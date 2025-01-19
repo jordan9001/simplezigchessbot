@@ -1,16 +1,24 @@
 ZG=../zig/zig
 
-.PHONY: all clean build-clean
+.PHONY: all clean build-clean clean-all
 
 EXE=zigchess
 
 all: $(EXE)
 
-$(EXE): bot.zig
+%.o: %.zig
+	$(ZG) build-obj $^
+
+$(EXE): bot.o luts.o
 	$(ZG) build-exe -femit-bin=$@ $^
 
 build-clean:
-	rm -f *.o
+	rm -f bot.o
+	rm -f *.o.o
 
 clean: build-clean
 	rm -f $(EXE)
+
+clean-all: clean
+	rm -f luts.o
+

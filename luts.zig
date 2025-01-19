@@ -5,7 +5,7 @@ const WIDTH = 1 << WIDTH_SHIFT;
 const HEIGHT = WIDTH;
 const NUMSQ = WIDTH * HEIGHT;
 
-const MagicInfo = struct {
+const MagicInfo = extern struct {
     mask: u64,
     magic: u64,
     shift: u64,
@@ -455,7 +455,7 @@ const lut_init = struct {
     }
 };
 
-const LUTs = struct {
+const LUTs = extern struct {
     bishop_magic: [NUMSQ]MagicInfo,
     rook_magic: [NUMSQ]MagicInfo,
     knight_moves: [NUMSQ]u64,
@@ -463,5 +463,8 @@ const LUTs = struct {
     lut_mem: [lut_init.get_magic_sz()]u64,
 };
 
-//TODO make sure we don't end up with extra weight because gen_LUTS ends up compiled in the binary?
-pub const g: LUTs = lut_init.gen_LUTs();
+export const g: LUTs = lut_init.gen_LUTs();
+
+comptime {
+    //@compileLog(std.fmt.comptimePrint("lut_mem size = {}\n", .{g.lut_mem.len}));
+}
