@@ -1,9 +1,8 @@
 const std = @import("std");
-
-const WIDTH_SHIFT = 3;
-const WIDTH = 1 << WIDTH_SHIFT;
-const HEIGHT = WIDTH;
-const NUMSQ = WIDTH * HEIGHT;
+const d = @import("./defs.zig");
+const WIDTH = d.WIDTH;
+const HEIGHT = d.HEIGHT;
+const NUMSQ = d.NUMSQ;
 
 const MagicInfo = extern struct {
     mask: u64,
@@ -185,7 +184,7 @@ const lut_init = struct {
     }
 
     fn get_rook_moves(sq: i32, maskcase: u64) u64 {
-        const file = sq >> WIDTH_SHIFT;
+        const file = sq >> d.WIDTH_SHIFT;
         const rank = sq & (WIDTH - 1);
 
         var moves: u64 = 0;
@@ -196,7 +195,7 @@ const lut_init = struct {
         f = file + 1;
         r = rank;
         while (f < HEIGHT) : (f += 1) {
-            mv = (1 << (r + (f << WIDTH_SHIFT)));
+            mv = (1 << (r + (f << d.WIDTH_SHIFT)));
             moves |= mv;
 
             if ((mv & maskcase) != 0) {
@@ -207,7 +206,7 @@ const lut_init = struct {
         f = file - 1;
         r = rank;
         while (f >= 0) : (f -= 1) {
-            mv = (1 << (r + (f << WIDTH_SHIFT)));
+            mv = (1 << (r + (f << d.WIDTH_SHIFT)));
             moves |= mv;
 
             if ((mv & maskcase) != 0) {
@@ -218,7 +217,7 @@ const lut_init = struct {
         f = file;
         r = rank + 1;
         while (r < WIDTH) : (r += 1) {
-            mv = (1 << (r + (f << WIDTH_SHIFT)));
+            mv = (1 << (r + (f << d.WIDTH_SHIFT)));
             moves |= mv;
 
             if ((mv & maskcase) != 0) {
@@ -229,7 +228,7 @@ const lut_init = struct {
         f = file;
         r = rank - 1;
         while (r >= 0) : (r -= 1) {
-            mv = (1 << (r + (f << WIDTH_SHIFT)));
+            mv = (1 << (r + (f << d.WIDTH_SHIFT)));
             moves |= mv;
 
             if ((mv & maskcase) != 0) {
@@ -241,7 +240,7 @@ const lut_init = struct {
     }
 
     fn get_bishop_moves(sq: i32, maskcase: u64) u64 {
-        const file = sq >> WIDTH_SHIFT;
+        const file = sq >> d.WIDTH_SHIFT;
         const rank = sq & (WIDTH - 1);
 
         var moves: u64 = 0;
@@ -265,7 +264,7 @@ const lut_init = struct {
                     break;
                 }
 
-                const mv = (1 << (r + (f << WIDTH_SHIFT)));
+                const mv = (1 << (r + (f << d.WIDTH_SHIFT)));
                 moves |= mv;
 
                 if ((mv & maskcase) != 0) {
@@ -434,6 +433,234 @@ const lut_init = struct {
         return moves;
     }
 
+    fn parse_piece_name(comptime str: [*:0]const u8) d.Piece {
+        var json_c = str;
+        var blackpiece: bool = undefined;
+
+        var key: [:0]const u8 = "white ";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            blackpiece = false;
+            json_c += key.len;
+        } else {
+            while (json_c[0] != ' ') : (json_c += 1) {
+                // don't escape the string
+                if (json_c[0] == '"') {
+                    unreachable;
+                }
+            }
+
+            json_c += 1;
+
+            blackpiece = true;
+        }
+
+        key = "pawn";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            json_c += key.len;
+
+            return if (blackpiece) d.Piece.b_pawn else d.Piece.w_pawn;
+        }
+
+        key = "knight";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            json_c += key.len;
+
+            return if (blackpiece) d.Piece.b_knight else d.Piece.w_knight;
+        }
+
+        key = "bishop";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            json_c += key.len;
+
+            return if (blackpiece) d.Piece.b_bishop else d.Piece.w_bishop;
+        }
+
+        key = "rook";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            json_c += key.len;
+
+            return if (blackpiece) d.Piece.b_rook else d.Piece.w_rook;
+        }
+
+        key = "queen";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            json_c += key.len;
+
+            return if (blackpiece) d.Piece.b_queen else d.Piece.w_queen;
+        }
+
+        key = "king";
+        if (std.mem.eql(u8, key, json_c[0..key.len])) {
+            json_c += key.len;
+
+            return if (blackpiece) d.Piece.b_king else d.Piece.w_king;
+        }
+
+        unreachable;
+    }
+
+    fn parse_boards(
+        comptime value_by_num_enemies: *d.value_by_num_enemies_t,
+        comptime value_by_num_pieces: *d.value_by_num_pieces_t,
+        comptime json: [*:0]const u8,
+    ) void {
+        //TODO is our data here valid?
+        // there are a lot more positive cp positions than negative!?
+        //TODO maybe combine the white and black boards? Lose some info that way though
+
+        // parse out the entries from the boards
+        var json_c: [*:0]const u8 = json;
+        // expect it to start with a '[
+        if (json_c[0] != '[') {
+            @compileError("expected '[' at json start");
+        }
+
+        json_c += 1;
+
+        // parse them in a loop
+        while (true) {
+            if (json_c[0] == ',') {
+                json_c += 1;
+            }
+
+            // we don't support whitespace in our json, make sure it is minimized
+            if (json_c[0] == ']') {
+                //done
+                break;
+            }
+
+            if (json_c[0] != '{') {
+                @compileError("Expected '{' in json");
+            }
+
+            json_c += 1;
+
+            // parse fields
+            var piece: ?u4 = null;
+            var cond_num_enemies: ?bool = null;
+            var cond_value: ?u8 = null;
+            var board: [NUMSQ]i16 = undefined;
+            while (true) {
+                if (json_c[0] == ',') {
+                    json_c += 1;
+                }
+
+                if (json_c[0] == '}') {
+                    json_c += 1;
+                    break;
+                }
+
+                // parse a field
+                //@compileLog(std.fmt.comptimePrint("Parsing field {s}\n", .{json_c[0..24]}));
+
+                if (json_c[0] != '"') {
+                    const count = json_c - json;
+                    @compileError(std.fmt.comptimePrint("Expected '\"' for a field, but got non-quote at {} spot: {s}\n", .{ json_c[0], count, json_c[0..24] }));
+                }
+                json_c += 1;
+
+                var key: [:0]const u8 = "Piece\":\"";
+                if (std.mem.eql(u8, key, json_c[0..key.len])) {
+                    json_c += key.len;
+
+                    piece = @intFromEnum(parse_piece_name(json_c));
+
+                    while (json_c[0] != '}' and json_c[0] != ',') : (json_c += 1) {}
+
+                    continue;
+                }
+
+                key = "Condition\":\"";
+                if (std.mem.eql(u8, key, json_c[0..key.len])) {
+                    json_c += key.len;
+
+                    key = "Number of Enemies\"";
+                    if (std.mem.eql(u8, key, json_c[0..key.len])) {
+                        cond_num_enemies = true;
+                        json_c += key.len;
+                    } else {
+                        cond_num_enemies = false;
+                        while (json_c[0] != '}' and json_c[0] != ',') : (json_c += 1) {}
+                    }
+                    continue;
+                }
+
+                key = "ConditionValue\":";
+                if (std.mem.eql(u8, key, json_c[0..key.len])) {
+                    json_c += key.len;
+
+                    var nend = 0;
+                    while (json_c[nend] != '}' and json_c[nend] != ',') : (nend += 1) {}
+
+                    cond_value = std.fmt.parseInt(u8, json_c[0..nend], 10) catch unreachable;
+
+                    json_c += nend;
+                    continue;
+                }
+
+                key = "Board\":[";
+                if (std.mem.eql(u8, key, json_c[0..key.len])) {
+                    json_c += key.len;
+
+                    // parse integers until we have them all
+                    var sq = 0;
+                    var nend = 0;
+                    while (sq < NUMSQ) : (sq += 1) {
+                        nend = 0;
+                        while (json_c[nend] != ',' and json_c[nend] != ']') : (nend += 1) {}
+
+                        board[sq] = std.fmt.parseInt(i16, json_c[0..nend], 10) catch unreachable;
+
+                        json_c += nend;
+
+                        if (json_c[0] == ']') {
+                            json_c += 1;
+                            if (sq != NUMSQ - 1) {
+                                unreachable;
+                            }
+                        } else if (json_c[0] == ',') {
+                            json_c += 1;
+                        } else {
+                            unreachable;
+                        }
+                    }
+
+                    continue;
+                }
+
+                key = "NumCases\":";
+                if (std.mem.eql(u8, key, json_c[0..key.len])) {
+                    json_c += key.len;
+
+                    // ignore this one
+                    while (json_c[0] != '}' and json_c[0] != ',') : (json_c += 1) {}
+                    continue;
+                }
+
+                unreachable;
+            }
+
+            // check we got everything and then fill out the slot
+            if (piece == null or cond_num_enemies == null or cond_value == null) {
+                unreachable;
+            }
+
+            if (cond_num_enemies.?) {
+                if (cond_value.? < d.LUT_MIN_ENEMIES) {
+                    unreachable;
+                }
+                @memcpy(&value_by_num_enemies[cond_value.? - d.LUT_MIN_ENEMIES][piece.?], &board);
+            } else {
+                if (cond_value.? < d.LUT_MIN_PIECES) {
+                    unreachable;
+                }
+                @memcpy(&value_by_num_pieces[cond_value.? - d.LUT_MIN_PIECES][piece.?], &board);
+            }
+        }
+
+        return;
+    }
+
     fn gen_LUTs() LUTs {
         var out = LUTs{
             .bishop_magic = undefined,
@@ -441,11 +668,15 @@ const lut_init = struct {
             .knight_moves = gen_knight_moves(),
             .king_moves = gen_king_moves(),
             .lut_mem = undefined,
+            .value_by_num_enemies = undefined,
+            .value_by_num_pieces = undefined,
         };
 
         var cursor: usize = 0;
         cursor = gen_magic(bishop_starter, true, cursor, &out.bishop_magic, &out.lut_mem);
         cursor = gen_magic(rook_starter, false, cursor, &out.rook_magic, &out.lut_mem);
+
+        parse_boards(&out.value_by_num_enemies, &out.value_by_num_pieces, @embedFile("./boards.json"));
 
         if (cursor != out.lut_mem.len) {
             unreachable;
@@ -461,6 +692,8 @@ const LUTs = extern struct {
     knight_moves: [NUMSQ]u64,
     king_moves: [NUMSQ]u64,
     lut_mem: [lut_init.get_magic_sz()]u64,
+    value_by_num_enemies: d.value_by_num_enemies_t,
+    value_by_num_pieces: d.value_by_num_pieces_t,
 };
 
 export const g: LUTs = lut_init.gen_LUTs();

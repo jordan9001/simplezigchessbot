@@ -1,7 +1,4 @@
-const WIDTH_SHIFT = 3;
-const WIDTH = 1 << WIDTH_SHIFT;
-const HEIGHT = WIDTH;
-const NUMSQ = WIDTH * HEIGHT;
+const d = @import("./defs.zig");
 
 const MagicInfo = extern struct {
     mask: u64,
@@ -16,10 +13,10 @@ const MagicInfo = extern struct {
 const LUT_MEM_SZ = 116864;
 
 const LUTs = extern struct {
-    bishop_magic: [NUMSQ]MagicInfo,
-    rook_magic: [NUMSQ]MagicInfo,
-    knight_moves: [NUMSQ]u64,
-    king_moves: [NUMSQ]u64,
+    bishop_magic: [d.NUMSQ]MagicInfo,
+    rook_magic: [d.NUMSQ]MagicInfo,
+    knight_moves: [d.NUMSQ]u64,
+    king_moves: [d.NUMSQ]u64,
     lut_mem: [LUT_MEM_SZ]u64,
 };
 
