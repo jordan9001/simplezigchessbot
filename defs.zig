@@ -28,6 +28,13 @@ pub const BoardFlags = packed struct {
     b_can_ooo: bool,
 };
 
+pub const Board = packed struct {
+    flags: BoardFlags,
+    layout: [NUMSQ]Piece,
+    occupied: u64,
+    white_occupied: u64,
+};
+
 pub const NUMPIECETYPES = 12;
 pub const MAX_ENEMIES = 16;
 pub const MAX_PIECES = MAX_ENEMIES * 2;
