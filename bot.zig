@@ -10,16 +10,91 @@ const state_node = struct {
     board: d.Board,
     depth: u16,
     parent: ?*state_node,
-    best_eval: std.atomic.Value(i32),
+    best_eval: std.atomic.Value(f32),
     live_children: std.atomic.Value(usize), // cannot propagate unless all children propagated
     //TODO use a futex here instead of two atomics?
     //TODO track best move here, not just eval?
 };
 
-fn evaluate(board: *d.Board) i32 {
-    _ = board;
+fn evaluate(board: *d.Board) f32 {
+    // given the board, what do we guess it's centi or milipawn value is?
+
+    // count the actual piece amount
+    var piece_balance: f32 = 0.0;
+
+    var b_piece_count: usize = 0;
+    var w_piece_count: usize = 0;
+
+    var num_bishops_w: usize = 0;
+    var num_bishops_b: usize = 0;
+    for (board.layout) |p| {
+        piece_balance += switch (p) {
+            d.Piece.b_pawn => -1,
+            d.Piece.w_pawn => 1,
+            d.Piece.b_knight => -3,
+            d.Piece.b_bishop => blk: {
+                num_bishops_b += 1;
+                break :blk -3;
+            },
+            d.Piece.w_knight => 3,
+            d.Piece.w_bishop => blk: {
+                num_bishops_w += 1;
+                break :blk 3;
+            },
+            d.Piece.b_rook => -5,
+            d.Piece.w_rook => 5,
+            d.Piece.b_queen => -9,
+            d.Piece.w_queen => 9,
+            d.Piece.b_king => 900,
+            d.Piece.w_king => 900,
+            d.Piece.empty => 0,
+        };
+
+        if (p != d.Piece.empty) {
+            if (!p.is_white()) {
+                b_piece_count += 1;
+            } else {
+                w_piece_count += 1;
+            }
+        }
+    }
+
+    // add bonus for both bishops
+    if (num_bishops_w >= 2) {
+        // should we have checked for a white sq and black sq bishop specifically?
+        piece_balance += 0.45;
+    }
+    if (num_bishops_b >= 2) {
+        piece_balance -= 0.45;
+    }
+
+    // check for pawn structure
     //TODO
-    return 0;
+
+    // check for pass pawn
+    //TODO
+
+    // check for check and checkmate
+    //TODO
+
+    // check our position in the LUTs
+    var pos_luts: f32 = 0;
+
+    for (board.layout, 0..board.layout.len) |p, sq| {
+        if (p != d.Piece.empty) {
+            var num_enemies = w_piece_count;
+            if (p.is_white()) {
+                num_enemies = b_piece_count;
+            }
+
+            pos_luts += @floatFromInt(luts.g.value_by_num_enemies[num_enemies - d.LUT_MIN_ENEMIES][@intFromEnum(p)][sq]);
+            pos_luts += @floatFromInt(luts.g.value_by_num_enemies[(w_piece_count + b_piece_count) - d.LUT_MIN_PIECES][@intFromEnum(p)][sq]);
+        }
+    }
+
+    // add it all together with some reasonable k values
+    //TODO find/train better k values?
+    return (pos_luts * 1.0) + (piece_balance * 2100.0);
 }
 
 fn expand(state: *state_node) bool {
@@ -81,30 +156,31 @@ fn work() void {
         // freeing memory as we propagate
         // this is where we need to be really careful about races
         // use @fieldParentPtr to get the node to free
-        var cnode: ?*state_node = &node.data;
-        var pnode: ?*state_node = null;
+        var cnode: *state_node = &node.data;
+        var pnode: *state_node = undefined;
         while (true) {
-            pnode = cnode;
-            cnode = cnode.parent;
 
             // if we reached the top, don't free that one
-            if (cnode == null) {
+            if (cnode.parent == null) {
                 break;
             }
 
+            pnode = cnode;
+            cnode = cnode.parent.?;
+
             // propagate the best_eval, if it is the min/max we want
-            const pbest = pnode.best_eval;
+            const pbest = pnode.best_eval.load(AtomicOrder.unordered);
 
             if (cnode.board.flags.black_turn) {
                 // this is black's turn, so it wants the eval that is most negative
-                cnode.best_eval.fetchMin(pbest, AtomicOrder.monotonic);
+                _ = cnode.best_eval.fetchMin(pbest, AtomicOrder.monotonic);
             } else {
-                cnode.best_eval.fetchMax(pbest, AtomicOrder.monotonic);
+                _ = cnode.best_eval.fetchMax(pbest, AtomicOrder.monotonic);
             }
 
             // free the lower node
-            const tofree: WorkQueue.Node = @fieldParentPtr("data", pnode);
-            heap.free(tofree);
+            const tofree: *WorkQueue.Node = @fieldParentPtr("data", pnode);
+            heap.destroy(tofree);
 
             const prev_child_count = cnode.live_children.fetchSub(1, AtomicOrder.monotonic);
             if (prev_child_count < 1) {

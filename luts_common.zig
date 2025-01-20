@@ -18,6 +18,8 @@ const LUTs = extern struct {
     knight_moves: [d.NUMSQ]u64,
     king_moves: [d.NUMSQ]u64,
     lut_mem: [LUT_MEM_SZ]u64,
+    value_by_num_enemies: d.value_by_num_enemies_t,
+    value_by_num_pieces: d.value_by_num_pieces_t,
 };
 
 //TODO make sure we don't end up with extra weight because gen_LUTS ends up compiled in the binary?

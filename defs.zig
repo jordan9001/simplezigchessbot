@@ -17,6 +17,12 @@ pub const Piece = enum(u4) {
     b_queen = 10,
     b_king = 11,
     empty = 0xf,
+
+    pub fn is_white(piece: Piece) bool {
+        const p: u4 = @intFromEnum(piece);
+        return (p >= @intFromEnum(Piece.w_pawn) and
+            p <= @intFromEnum(Piece.w_king));
+    }
 };
 
 pub const BoardFlags = packed struct {
