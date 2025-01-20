@@ -4,7 +4,7 @@ const WIDTH = d.WIDTH;
 const HEIGHT = d.HEIGHT;
 const NUMSQ = d.NUMSQ;
 
-const MagicInfo = extern struct {
+pub const MagicInfo = extern struct {
     mask: u64,
     magic: u64,
     shift: u64,
@@ -696,7 +696,7 @@ const LUTs = extern struct {
     value_by_num_pieces: d.value_by_num_pieces_t,
 };
 
-export const g: LUTs = lut_init.gen_LUTs();
+pub export const g: LUTs = lut_init.gen_LUTs();
 
 comptime {
     //@compileLog(std.fmt.comptimePrint("lut_mem size = {}\n", .{g.lut_mem.len}));

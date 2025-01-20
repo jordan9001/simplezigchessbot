@@ -2,7 +2,10 @@ const std = @import("std");
 const AtomicOrder = std.builtin.AtomicOrder;
 
 const luts = @import("./luts_common.zig");
+//const luts = @import("./luts.zig"); // test unified, to make sure
 const d = @import("./defs.zig");
+const NUMSQ = d.NUMSQ;
+const WIDTH = d.WIDTH;
 
 const heap = std.heap.c_allocator;
 
@@ -13,7 +16,7 @@ const state_node = struct {
     best_eval: std.atomic.Value(f32),
     live_children: std.atomic.Value(usize), // cannot propagate unless all children propagated
     //TODO use a futex here instead of two atomics?
-    //TODO track best move here, not just eval?
+    //TODO track best move combo here, not just eval?
 };
 
 fn evaluate(board: *d.Board) f32 {
@@ -97,17 +100,178 @@ fn evaluate(board: *d.Board) f32 {
     return (pos_luts * 1.0) + (piece_balance * 2100.0);
 }
 
-fn expand(state: *state_node) bool {
+fn expand(state: *state_node, link_parent: bool) bool {
     var expanded = false;
     // given a position, go another layer down
     // adding new states to explore to our queue
     // cut off at the desired depth
-    //TODO
-    _ = state;
-    expanded = false;
+    var moves: u64 = 0;
+    var movesq: usize = NUMSQ;
 
-    // when placing children in the queue, make sure you have fetchAdd'd the live_count first
-    //TODO
+    // could unroll this?
+    sqloop: for (0..NUMSQ) |sq| {
+        const p = state.board.layout[sq];
+
+        const w_turn: bool = !state.board.flags.black_turn;
+
+        if ((p == d.Piece.empty) or
+            (p.is_white() != w_turn))
+        {
+            continue;
+        }
+
+        moves = 0;
+
+        switch (p) {
+            d.Piece.empty => {
+                continue :sqloop;
+            },
+            d.Piece.w_pawn, d.Piece.b_pawn => {
+                //TODO check for enpassant, double move
+                //TODO handle promotion
+                // promotion and double move require flag changes
+
+                if (p == d.Piece.b_pawn) {
+                    movesq = sq - WIDTH;
+                    if (movesq < 0) {
+                        continue :sqloop;
+                    }
+                } else {
+                    movesq = sq + WIDTH;
+                    if (movesq > NUMSQ) {
+                        continue :sqloop;
+                    }
+                }
+
+                // only more forward if unocc
+                if ((state.board.occupied & (@as(u64, 1) << @truncate(movesq))) == 0) {
+                    moves |= (@as(u64, 1) << @truncate(movesq));
+                }
+
+                // check if we can take
+                if ((movesq & (WIDTH - 1)) != 0) {
+                    if (((@as(u64, 1) << @truncate(movesq - 1)) & state.board.occupied) == 0) {
+                        moves |= (@as(u64, 1) << @truncate(movesq - 1));
+                    }
+                }
+                if ((movesq & (WIDTH - 1)) != (WIDTH - 1)) {
+                    if (((@as(u64, 1) << @truncate(movesq + 1)) & state.board.occupied) == 0) {
+                        moves |= (@as(u64, 1) << @truncate(movesq + 1));
+                    }
+                }
+            },
+            d.Piece.w_king, d.Piece.b_king => {
+                //TODO handle OO and OOO, which require flag changes and two pieces moving
+                moves = luts.g.king_moves[sq];
+            },
+            d.Piece.w_knight, d.Piece.b_knight => {
+                moves = luts.g.knight_moves[sq];
+            },
+            d.Piece.w_bishop, d.Piece.b_bishop => {
+                // use magic
+                const mi: luts.MagicInfo = luts.g.bishop_magic[sq];
+                const index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+
+                moves = luts.g.lut_mem[index + mi.tbl_off];
+            },
+            d.Piece.w_rook, d.Piece.b_rook => {
+                // use magic
+                const mi: luts.MagicInfo = luts.g.rook_magic[sq];
+                const index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+
+                moves = luts.g.lut_mem[index + mi.tbl_off];
+            },
+            d.Piece.w_queen, d.Piece.b_queen => {
+                // use magic
+                var mi: luts.MagicInfo = luts.g.bishop_magic[sq];
+                var index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+
+                moves = luts.g.lut_mem[index + mi.tbl_off];
+
+                mi = luts.g.rook_magic[sq];
+                index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+
+                moves |= luts.g.lut_mem[index + mi.tbl_off];
+            },
+        }
+
+        // if we didn't continue by here, make the moves
+        if (moves == 0) {
+            continue;
+        }
+
+        var move: u64 = 1;
+        movesq = 0;
+        while (movesq < NUMSQ) : ({
+            move <<= 1;
+            movesq += 1;
+        }) {
+            if ((move & moves) == 0) {
+                continue;
+            }
+
+            // for each move in moves, check it is not a self-capture
+            if (w_turn) {
+                if ((move & state.board.white_occupied) != 0) {
+                    continue;
+                }
+            } else {
+                if (((move & state.board.occupied) != 0) and ((move & state.board.white_occupied) == 0)) {
+                    continue;
+                }
+            }
+
+            // okay, make the move!
+            expanded = true;
+            // when placing children in the queue, make sure you have fetchAdd'd the live_count first
+            _ = state.live_children.fetchAdd(1, AtomicOrder.monotonic);
+
+            const newnode: *WorkQueue.Node = heap.create(WorkQueue.Node) catch unreachable;
+
+            newnode.data.depth = state.depth + 1;
+            newnode.data.parent = null;
+            if (link_parent) {
+                newnode.data.parent = state;
+            }
+
+            newnode.data.board = state.board;
+
+            // initial eval needs to be worst possible
+            var worst: f32 = undefined;
+            if (w_turn) {
+                // so this new node will be black's turn, they will choose the most negative
+                worst = std.math.inf(f32);
+            } else {
+                // so this new node will be white's turn, they will choose the most positive
+                worst = -std.math.inf(f32);
+            }
+            newnode.data.board.flags.black_turn = !w_turn;
+            newnode.data.best_eval = std.atomic.Value(f32).init(worst);
+            newnode.data.live_children = std.atomic.Value(usize).init(0);
+
+            // clear the enpassant each turn, unless we just did a double, then set it
+            //TODO
+            newnode.data.board.flags.enpassant_sq = 0;
+
+            // update the layout, occupied, and white_occupied
+            newnode.data.board.layout[sq] = d.Piece.empty;
+            newnode.data.board.layout[movesq] = p;
+            newnode.data.board.occupied |= move;
+            newnode.data.board.occupied &= ~move;
+
+            if (w_turn) {
+                newnode.data.board.white_occupied |= move;
+                newnode.data.board.white_occupied &= ~move;
+            }
+
+            // add the move to the queue!
+            work_queue_mux.lock();
+            work_queue.append(newnode);
+            work_queue_mux.unlock();
+
+            work_ready_sem.post();
+        }
+    }
 
     return expanded;
 }
@@ -115,7 +279,7 @@ fn expand(state: *state_node) bool {
 var work_ready_sem = std.Thread.Semaphore{};
 const WorkQueue = std.DoublyLinkedList(state_node);
 var work_queue = WorkQueue{};
-var work_queue_mux = std.Thread.Mutex{};
+var work_queue_mux = std.Thread.Mutex{}; // TODO better as a futex?
 
 //TODO going to have to make this movable
 const TARGET_DEPTH = 3;
@@ -141,7 +305,7 @@ fn work() void {
 
         // expand it if it needs expanding
         if (node.data.depth < TARGET_DEPTH) {
-            if (expand(&node.data)) {
+            if (expand(&node.data, true)) {
                 // added children to the queue, we can drop this and grab more work
                 continue;
             }
@@ -197,10 +361,16 @@ fn work() void {
     }
 }
 
+fn game_loop() void {
+    // get game commands
+    // expand a board state into possible moves
+    // wait until we have the results
+}
+
 pub fn main() !void {
     std.debug.print("Starting up {}\n", .{luts.g.king_moves.len});
 
-    //var threads: [std.Thread.getCpuCount()]std.Thread = undefined;
+    //var threads: [std.Thread.getCpuCount() - 2]std.Thread = undefined;
     //DEBUG
     var threads: [1]std.Thread = undefined;
 

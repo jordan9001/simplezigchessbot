@@ -1,6 +1,6 @@
 const d = @import("./defs.zig");
 
-const MagicInfo = extern struct {
+pub const MagicInfo = extern struct {
     mask: u64,
     magic: u64,
     shift: u64,
