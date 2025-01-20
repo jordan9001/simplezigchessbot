@@ -4,13 +4,15 @@ ZG=../zig/zig
 
 EXE=zigchess
 
+LIBS=
+
 all: $(EXE)
 
 %.o: %.zig
 	$(ZG) build-obj $^
 
 $(EXE): bot.o luts.o
-	$(ZG) build-exe -femit-bin=$@ $^
+	$(ZG) build-exe -femit-bin=$@ $^ $(LIBS)
 
 build-clean:
 	rm -f bot.o

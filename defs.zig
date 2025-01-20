@@ -28,7 +28,7 @@ pub const BoardFlags = packed struct {
     b_can_ooo: bool,
 };
 
-pub const Board = packed struct {
+pub const Board = struct {
     flags: BoardFlags,
     layout: [NUMSQ]Piece,
     occupied: u64,
