@@ -4,7 +4,7 @@ ZG=../zig/zig
 
 EXE=zigchess
 
-LIBS=-lc
+LIBS=-lc $(shell curl-config --libs)
 
 all: $(EXE)
 

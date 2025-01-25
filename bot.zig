@@ -1,9 +1,13 @@
 const std = @import("std");
 const AtomicOrder = std.builtin.AtomicOrder;
+const cURL = @cImport({
+    @cInclude("curl/curl.h");
+});
 
 const luts = @import("./luts_common.zig");
 //const luts = @import("./luts.zig"); // test unified, to make sure
 const d = @import("./defs.zig");
+
 const NUMSQ = d.NUMSQ;
 const WIDTH = d.WIDTH;
 
@@ -361,16 +365,105 @@ fn work() void {
     }
 }
 
-fn game_loop() void {
-    // get game commands
+const MAX_GAMES = 0; //TODO test and raise
+const MAX_POLFD = 1 + MAX_GAMES;
+const HOST = "lichess.org";
+const POLL_TIMEOUT = 15000;
+
+fn game_loop_data_cb(ptr: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) usize {
+    // I thiiiiink this will always be in the same thread as game_loop
+    // so no locking needed on pointers in userdata
+
+    // add streams for each game we are involved with
+    // /api/bot/game/stream/{}
+    //TODO
+
+    // accept challenges (up to a certain amount of live games)
+    // and add the stream
+    //TODO
+
+    // close streams for finished games
+    //TODO
+
+    // when we get a move, expand our moves and put them on the queue
+
     // expand a board state into possible moves
-    // wait until we have the results
+    // tell our sender thread it has moves to watch for
+    //TODO
+}
+
+fn game_loop(token: [*:0]const u8) void {
+    const cmulti = cURL.curl_multi_init() orelse @panic("Can't init curl multi");
+    defer cURL.curl_multi_cleanup(cmulti);
+
+    // get stream for overall events
+    // /api/stream/event
+    const event_stream = cURL.curl_easy_init() orelse @panic("Can't allocate curl handle");
+    defer cURL.curl_easy_cleanup(event_stream);
+
+    // add options, such as CURLOPT_WRITEFUNCTION,
+    //TODO
+
+    cURL.curl_multi_add_handle(cmulti, event_stream);
+
+    var gamecount: usize = 0;
+
+    // get all our ongoing games, and add them to our set
+    // and for each of them that are awaiting our moves, make sure we will handle those?
+    // /api/account/playing
+    //TODO
+
+    // add streams for each game we are involved with
+    // /api/bot/game/stream/{}
+    //TODO
+
+    var still_running: c_int = 1;
+    var numfds: c_int = 0;
+    var remaining: c_int = 0;
+    var mc: cURL.CURLMcode = 0;
+
+    while (still_running) {
+        mc = cURL.curl_multi_perform(cmulti, &still_running);
+
+        if (!mc and still_running != 0) {
+            // poll on the handles
+            mc = cURL.curl_multi_wait(cmulti, null, 0, POLL_TIMEOUT, &numfds);
+        }
+
+        if (mc != cURL.CURLM_OK) {
+            std.dbg.panic("Unhandled multi error: {}\n", .{mc});
+        }
+
+        remaining = 1;
+        while (remaining) {
+            const msg = cURL.curl_multi_info_read(cmulti, &remaining);
+            if (msg == null) {
+                break;
+            }
+
+            // we only get here if our streams finish
+            // if it is the event stream, what do we do? open another one I guess
+            //TODO
+
+            // if it is a game stream, remove it
+            // and cancel any moves waiting to be sent?
+            //TODO
+        }
+    }
+
+    std.debug.print("Ending Game Loop\n", .{});
 }
 
 pub fn main() !void {
     std.debug.print("Starting up {}\n", .{luts.g.king_moves.len});
 
-    //var threads: [std.Thread.getCpuCount() - 2]std.Thread = undefined;
+    if (cURL.curl_global_init(cURL.CURL_GLOBAL_ALL) != cURL.CURLE_OK) {
+        std.debug.print("Curl Global Init Failed");
+        return -1;
+    }
+    defer cURL.curl_global_cleanup();
+
+    //var threads: [std.Thread.getCpuCount() - 3]std.Thread = undefined;
     //DEBUG
     var threads: [1]std.Thread = undefined;
 
@@ -382,7 +475,9 @@ pub fn main() !void {
     }
 
     // set up the game handler
-    //TODO
+    const token: [*:0]const u8 = std.c.getenv("LICHESS_TOK") orelse @panic("LICHESS_TOK env var is required");
+
+    game_loop(token);
 
     // done, signal the workers and wait for them to finish
     std.debug.print("Shutting down\n", .{});
