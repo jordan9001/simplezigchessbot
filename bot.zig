@@ -1,5 +1,4 @@
 const std = @import("std");
-const AtomicOrder = std.builtin.AtomicOrder;
 const cURL = @cImport({
     @cInclude("curl/curl.h");
 });
@@ -17,10 +16,14 @@ const state_node = struct {
     board: d.Board,
     depth: u16,
     parent: ?*state_node,
-    best_eval: std.atomic.Value(f32),
-    live_children: std.atomic.Value(usize), // cannot propagate unless all children propagated
-    //TODO use a futex here instead of two atomics?
-    //TODO track best move combo here, not just eval?
+    move_start: i8,
+    move_end: i8,
+
+    mux: std.Thread.Mutex, // this mux protects below items
+    best_eval: f32,
+    best_move_end: i8,
+    best_move_start: i8,
+    live_children: usize, // cannot propagate unless all children propagated
 };
 
 fn evaluate(board: *d.Board) f32 {
@@ -228,9 +231,20 @@ fn expand(state: *state_node, link_parent: bool) bool {
             // okay, make the move!
             expanded = true;
             // when placing children in the queue, make sure you have fetchAdd'd the live_count first
-            _ = state.live_children.fetchAdd(1, AtomicOrder.monotonic);
+            state.mux.lock();
+            state.live_children += 1;
+            state.mux.unlock();
 
             const newnode: *WorkQueue.Node = heap.create(WorkQueue.Node) catch unreachable;
+
+            newnode.data.mux = .{};
+            newnode.data.best_eval = 0;
+            newnode.data.best_move_start = -1;
+            newnode.data.best_move_end = -1;
+            newnode.data.live_children = 0;
+
+            newnode.data.move_start = @intCast(sq);
+            newnode.data.move_end = @intCast(movesq);
 
             newnode.data.depth = state.depth + 1;
             newnode.data.parent = null;
@@ -239,19 +253,7 @@ fn expand(state: *state_node, link_parent: bool) bool {
             }
 
             newnode.data.board = state.board;
-
-            // initial eval needs to be worst possible
-            var worst: f32 = undefined;
-            if (w_turn) {
-                // so this new node will be black's turn, they will choose the most negative
-                worst = std.math.inf(f32);
-            } else {
-                // so this new node will be white's turn, they will choose the most positive
-                worst = -std.math.inf(f32);
-            }
             newnode.data.board.flags.black_turn = !w_turn;
-            newnode.data.best_eval = std.atomic.Value(f32).init(worst);
-            newnode.data.live_children = std.atomic.Value(usize).init(0);
 
             // clear the enpassant each turn, unless we just did a double, then set it
             //TODO
@@ -317,8 +319,8 @@ fn work() void {
 
         // otherwise
         // evaluate it if it wasn't expanded
-        // this one doesn't need to be atomic, so unordered is fine
-        node.data.best_eval.store(evaluate(&node.data.board), AtomicOrder.unordered);
+        // this one doesn't need to be atomic, since it is a leaf
+        node.data.best_eval = evaluate(&node.data.board);
 
         // propagate move values back up the tree, as far as you can
         // freeing memory as we propagate
@@ -329,7 +331,10 @@ fn work() void {
         while (true) {
 
             // if we reached the top, don't free that one
+            // we need to at this point, see if we have a response to send back
             if (cnode.parent == null) {
+                // if we have returned all the live children, we can send a response
+                //TODO
                 break;
             }
 
@@ -337,20 +342,38 @@ fn work() void {
             cnode = cnode.parent.?;
 
             // propagate the best_eval, if it is the min/max we want
-            const pbest = pnode.best_eval.load(AtomicOrder.unordered);
+            const pbest = pnode.best_eval;
 
-            if (cnode.board.flags.black_turn) {
+            // do the mux instead of atomic
+
+            cnode.mux.lock();
+            if (cnode.best_move_start < 0) {
+                cnode.best_eval = pbest;
+                cnode.best_move_start = pnode.move_start;
+                cnode.best_move_start = pnode.move_end;
+            } else if (cnode.board.flags.black_turn) {
                 // this is black's turn, so it wants the eval that is most negative
-                _ = cnode.best_eval.fetchMin(pbest, AtomicOrder.monotonic);
+                if (pbest < cnode.best_eval) {
+                    cnode.best_eval = pbest;
+                    cnode.best_move_start = pnode.move_start;
+                    cnode.best_move_start = pnode.move_end;
+                }
             } else {
-                _ = cnode.best_eval.fetchMax(pbest, AtomicOrder.monotonic);
+                if (pbest > cnode.best_eval) {
+                    cnode.best_eval = pbest;
+                    cnode.best_move_start = pnode.move_start;
+                    cnode.best_move_start = pnode.move_end;
+                }
             }
+
+            const prev_child_count = cnode.live_children;
+            cnode.live_children -= 1;
+            cnode.mux.unlock();
 
             // free the lower node
             const tofree: *WorkQueue.Node = @fieldParentPtr("data", pnode);
             heap.destroy(tofree);
 
-            const prev_child_count = cnode.live_children.fetchSub(1, AtomicOrder.monotonic);
             if (prev_child_count < 1) {
                 unreachable;
             } else if (prev_child_count > 1) {
@@ -370,9 +393,20 @@ const MAX_POLFD = 1 + MAX_GAMES;
 const HOST = "lichess.org";
 const POLL_TIMEOUT = 15000;
 
-fn game_loop_data_cb(ptr: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) usize {
+const game_write_ctx = struct {
+    gamecount: usize,
+    cmulti: *cURL.CURLM,
+};
+
+fn game_loop_data_cb(ptr: [*]u8, size: usize, nmemb: usize, ctx: *game_write_ctx) callconv(.C) usize {
     // I thiiiiink this will always be in the same thread as game_loop
-    // so no locking needed on pointers in userdata
+    // so no locking needed on pointers in ctx
+
+    _ = ptr;
+    _ = size;
+    _ = nmemb;
+    _ = ctx;
+    return 0;
 
     // add streams for each game we are involved with
     // /api/bot/game/stream/{}
@@ -388,13 +422,23 @@ fn game_loop_data_cb(ptr: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque
     // when we get a move, expand our moves and put them on the queue
 
     // expand a board state into possible moves
-    // tell our sender thread it has moves to watch for
     //TODO
 }
 
-fn game_loop(token: [*:0]const u8) void {
-    const cmulti = cURL.curl_multi_init() orelse @panic("Can't init curl multi");
-    defer cURL.curl_multi_cleanup(cmulti);
+fn game_loop() void {
+    var gamectx = .{
+        .gamecount = 0,
+        .cmulti = cURL.curl_multi_init() orelse @panic("Can't init curl multi"),
+    };
+    var ec: cURL.CURLcode = 0;
+    var mc: cURL.CURLMcode = 0;
+
+    defer {
+        mc = cURL.curl_multi_cleanup(gamectx.cmulti);
+        if (mc != cURL.CURLM_OK) {
+            std.debug.print("Error cleaning up curl multi: {}\n", .{mc});
+        }
+    }
 
     // get stream for overall events
     // /api/stream/event
@@ -402,11 +446,21 @@ fn game_loop(token: [*:0]const u8) void {
     defer cURL.curl_easy_cleanup(event_stream);
 
     // add options, such as CURLOPT_WRITEFUNCTION,
-    //TODO
 
-    cURL.curl_multi_add_handle(cmulti, event_stream);
+    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_WRITEFUNCTION, &game_loop_data_cb);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for writefunction");
+    }
 
-    var gamecount: usize = 0;
+    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_WRITEDATA, &gamectx);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for writedata");
+    }
+
+    mc = cURL.curl_multi_add_handle(gamectx.cmulti, event_stream);
+    if (mc != cURL.CURLM_OK) {
+        @panic("failed to add initial curl handle");
+    }
 
     // get all our ongoing games, and add them to our set
     // and for each of them that are awaiting our moves, make sure we will handle those?
@@ -420,23 +474,22 @@ fn game_loop(token: [*:0]const u8) void {
     var still_running: c_int = 1;
     var numfds: c_int = 0;
     var remaining: c_int = 0;
-    var mc: cURL.CURLMcode = 0;
 
-    while (still_running) {
-        mc = cURL.curl_multi_perform(cmulti, &still_running);
+    while (still_running != 0) {
+        mc = cURL.curl_multi_perform(gamectx.cmulti, &still_running);
 
-        if (!mc and still_running != 0) {
+        if (mc == cURL.CURLM_OK and still_running != 0) {
             // poll on the handles
-            mc = cURL.curl_multi_wait(cmulti, null, 0, POLL_TIMEOUT, &numfds);
+            mc = cURL.curl_multi_wait(gamectx.cmulti, null, 0, POLL_TIMEOUT, &numfds);
         }
 
         if (mc != cURL.CURLM_OK) {
-            std.dbg.panic("Unhandled multi error: {}\n", .{mc});
+            std.debug.panic("Unhandled multi error: {}\n", .{mc});
         }
 
         remaining = 1;
-        while (remaining) {
-            const msg = cURL.curl_multi_info_read(cmulti, &remaining);
+        while (remaining > 0) {
+            const msg = cURL.curl_multi_info_read(gamectx.cmulti, &remaining);
             if (msg == null) {
                 break;
             }
@@ -454,12 +507,14 @@ fn game_loop(token: [*:0]const u8) void {
     std.debug.print("Ending Game Loop\n", .{});
 }
 
+var g_token: [*:0]const u8 = "";
+
 pub fn main() !void {
     std.debug.print("Starting up {}\n", .{luts.g.king_moves.len});
 
     if (cURL.curl_global_init(cURL.CURL_GLOBAL_ALL) != cURL.CURLE_OK) {
-        std.debug.print("Curl Global Init Failed");
-        return -1;
+        std.debug.print("Curl Global Init Failed", .{});
+        return;
     }
     defer cURL.curl_global_cleanup();
 
@@ -475,9 +530,9 @@ pub fn main() !void {
     }
 
     // set up the game handler
-    const token: [*:0]const u8 = std.c.getenv("LICHESS_TOK") orelse @panic("LICHESS_TOK env var is required");
+    g_token = std.c.getenv("LICHESS_TOK") orelse @panic("LICHESS_TOK env var is required");
 
-    game_loop(token);
+    game_loop();
 
     // done, signal the workers and wait for them to finish
     std.debug.print("Shutting down\n", .{});
