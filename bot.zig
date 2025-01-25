@@ -18,6 +18,7 @@ const state_node = struct {
     parent: ?*state_node,
     move_start: i8,
     move_end: i8,
+    game_id: [*:0]const u8,
 
     mux: std.Thread.Mutex, // this mux protects below items
     best_eval: f32,
@@ -243,6 +244,7 @@ fn expand(state: *state_node, link_parent: bool) bool {
             newnode.data.best_move_end = -1;
             newnode.data.live_children = 0;
 
+            newnode.data.game_id = state.game_id;
             newnode.data.move_start = @intCast(sq);
             newnode.data.move_end = @intCast(movesq);
 
@@ -329,15 +331,6 @@ fn work() void {
         var cnode: *state_node = &node.data;
         var pnode: *state_node = undefined;
         while (true) {
-
-            // if we reached the top, don't free that one
-            // we need to at this point, see if we have a response to send back
-            if (cnode.parent == null) {
-                // if we have returned all the live children, we can send a response
-                //TODO
-                break;
-            }
-
             pnode = cnode;
             cnode = cnode.parent.?;
 
@@ -381,7 +374,22 @@ fn work() void {
                 break;
             }
 
-            // we are the leaf! Move on up the tree
+            if (cnode.parent == null) {
+                // if we have returned all the live children, and are the root, we can send a response
+
+                // this is safe because we can only reach this if we were the last child up
+                // right?
+
+                send_move(cnode.game_id, cnode.best_move_start, cnode.best_move_end);
+
+                // free it as well, now that we are done with it
+                const roottofree: *WorkQueue.Node = @fieldParentPtr("data", cnode);
+                heap.destroy(roottofree);
+
+                break;
+            }
+
+            // we are a leaf! Move on up the tree
         }
 
         // continue to find other work
@@ -397,6 +405,13 @@ const game_write_ctx = struct {
     gamecount: usize,
     cmulti: *cURL.CURLM,
 };
+
+fn send_move(game_id: [*:0]const u8, best_move_start: i8, best_move_end: i8) void {
+    //TODO
+    _ = game_id;
+    _ = best_move_start;
+    _ = best_move_end;
+}
 
 fn game_loop_data_cb(ptr: [*]u8, size: usize, nmemb: usize, ctx: *game_write_ctx) callconv(.C) usize {
     // I thiiiiink this will always be in the same thread as game_loop
