@@ -399,6 +399,7 @@ fn work() void {
 const MAX_GAMES = 0; //TODO test and raise
 const MAX_POLFD = 1 + MAX_GAMES;
 const HOST = "lichess.org";
+const HTTPS_HOST = "https://" ++ HOST;
 const POLL_TIMEOUT = 15000;
 
 const game_write_ctx = struct {
@@ -411,33 +412,140 @@ fn send_move(game_id: [*:0]const u8, best_move_start: i8, best_move_end: i8) voi
     _ = game_id;
     _ = best_move_start;
     _ = best_move_end;
+    unreachable;
 }
 
-fn game_loop_data_cb(ptr: [*]u8, size: usize, nmemb: usize, ctx: *game_write_ctx) callconv(.C) usize {
+fn accept_challenge(id: []const u8) void {
+    _ = id;
+    //TODO
+    unreachable;
+}
+
+fn ignore_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *anyopaque) callconv(.C) usize {
+    _ = ptr;
+    _ = ctx;
+
+    return nmemb;
+}
+
+fn reject_challenge(id: []const u8) void {
+    var ec: cURL.CURLcode = undefined;
+    const chandle = cURL.curl_easy_init();
+    if (chandle == null) {
+        @panic("Cannot init easy curl handle");
+    }
+
+    defer cURL.curl_easy_cleanup(chandle);
+
+    const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/challenge/{s}/decline", .{id}) catch unreachable;
+    std.debug.print("Rejecting @ {s}\n", .{url});
+    defer heap.free(url);
+
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POST, @as(c_long, 1));
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POSTFIELDSIZE, @as(c_long, 0));
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_URL, url.ptr);
+    //_ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_VERBOSE, @as(c_int, 1));
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEFUNCTION, &ignore_data_cb);
+
+    ec = cURL.curl_easy_perform(chandle);
+    if (ec != cURL.CURLE_OK) {
+        std.debug.print("When trying to reject {s}, got error code {}\n", .{ id, ec });
+        return;
+    }
+}
+
+const stream_msg_type = struct {
+    type: []const u8,
+};
+
+// gameStart Start of a game
+// don't up game count, we do that in challenges
+//TODO
+
+// gameFinish Completion of a game
+// Don't care, just lower game count
+
+// challenge A player sends you a challenge or you challenge someone
+// just need the id to accept the challenge or reject it
+const stream_msg_type_challenge = struct {
+    type: []const u8,
+    challenge: struct {
+        id: []const u8,
+    },
+};
+
+// challengeCanceled A player cancels their challenge to you
+// Don't care
+
+// challengeDeclined The opponent declines your challenge
+// Don't care
+
+// gameFull Full game data. All values are immutable, except for the state field.
+//TODO
+
+// gameState Current state of the game. Immutable values not included.
+//TODO
+
+// chatLine Chat message sent by a user (or the bot itself) in the room "player" or "spectator".
+// Don't care
+
+// opponentGone Whether the opponent has left the game, and how long before you can claim a win or draw.
+//TODO
+
+fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ctx) callconv(.C) usize {
     // I thiiiiink this will always be in the same thread as game_loop
     // so no locking needed on pointers in ctx
+    const data = ptr[0..nmemb];
 
-    _ = ptr;
-    _ = size;
-    _ = nmemb;
-    _ = ctx;
-    return 0;
+    //DEBUG
+    std.debug.print("Debug: {} {s}", .{ nmemb, data });
 
-    // add streams for each game we are involved with
+    if (nmemb <= 1) {
+        // just a keepalive
+        return nmemb;
+    }
+
+    // we only ever get messages here from event stream or a game stream
+    // so it will always be json, and include a "type" field"
+    const msg_data = std.json.parseFromSlice(
+        stream_msg_type,
+        heap,
+        data,
+        .{ .ignore_unknown_fields = true },
+    ) catch @panic("unable to parse response from lichess");
+    defer msg_data.deinit();
+
+    std.debug.print("Got {s} message\n", .{msg_data.value.type});
+
+    // accept challenges (up to a certain amount of live games)
+    if (std.mem.eql(u8, msg_data.value.type, "challenge")) {
+        // parse out the id
+        const chal_data = std.json.parseFromSlice(
+            stream_msg_type_challenge,
+            heap,
+            data,
+            .{ .ignore_unknown_fields = true },
+        ) catch @panic("unable to parse challenge msg");
+        defer chal_data.deinit();
+
+        if (gamectx.gamecount < MAX_GAMES) {
+            accept_challenge(chal_data.value.challenge.id);
+            gamectx.gamecount += 1;
+        } else {
+            reject_challenge(chal_data.value.challenge.id);
+        }
+        //TODO
+    }
+
+    // add the stream for a game start
     // /api/bot/game/stream/{}
     //TODO
 
-    // accept challenges (up to a certain amount of live games)
-    // and add the stream
+    // when we get a move, make a board and put it on the queue
     //TODO
 
-    // close streams for finished games
-    //TODO
-
-    // when we get a move, expand our moves and put them on the queue
-
-    // expand a board state into possible moves
-    //TODO
+    return nmemb;
 }
 
 fn game_loop() void {
@@ -461,6 +569,10 @@ fn game_loop() void {
     defer cURL.curl_easy_cleanup(event_stream);
 
     // add options, such as CURLOPT_WRITEFUNCTION,
+    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_URL, HTTPS_HOST ++ "/api/stream/event");
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for url");
+    }
 
     ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_WRITEFUNCTION, &game_loop_data_cb);
     if (ec != cURL.CURLE_OK) {
@@ -470,6 +582,11 @@ fn game_loop() void {
     ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_WRITEDATA, &gamectx);
     if (ec != cURL.CURLE_OK) {
         @panic("Setopt failed for writedata");
+    }
+
+    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for headers");
     }
 
     mc = cURL.curl_multi_add_handle(gamectx.cmulti, event_stream);
@@ -499,7 +616,7 @@ fn game_loop() void {
         }
 
         if (mc != cURL.CURLM_OK) {
-            std.debug.panic("Unhandled multi error: {}\n", .{mc});
+            std.debug.panic("Unhandled multi error: {}", .{mc});
         }
 
         remaining = 1;
@@ -509,26 +626,39 @@ fn game_loop() void {
                 break;
             }
 
+            if (msg.*.msg != cURL.CURLMSG_DONE) {
+                unreachable;
+            }
+
+            std.debug.print("Closing handle with status {}", .{msg.*.data.result});
+
             // we only get here if our streams finish
             // if it is the event stream, what do we do? open another one I guess
-            //TODO
+            if (msg.*.easy_handle == event_stream) {
+                @panic("event stream closed");
+            }
 
             // if it is a game stream, remove it
             // and cancel any moves waiting to be sent?
-            //TODO
+            mc = cURL.curl_multi_remove_handle(gamectx.cmulti, msg.*.easy_handle);
+            if (mc != cURL.CURLM_OK) {
+                std.debug.panic("Unhandled multi error when removing handle: {}", .{mc});
+            }
+
+            cURL.curl_easy_cleanup(msg.*.easy_handle);
         }
     }
 
     std.debug.print("Ending Game Loop\n", .{});
 }
 
-var g_token: [*:0]const u8 = "";
+var g_hdr_list: ?*cURL.curl_slist = null;
 
 pub fn main() !void {
     std.debug.print("Starting up {}\n", .{luts.g.king_moves.len});
 
     if (cURL.curl_global_init(cURL.CURL_GLOBAL_ALL) != cURL.CURLE_OK) {
-        std.debug.print("Curl Global Init Failed", .{});
+        std.debug.print("Curl Global Init Failed\n", .{});
         return;
     }
     defer cURL.curl_global_cleanup();
@@ -545,7 +675,12 @@ pub fn main() !void {
     }
 
     // set up the game handler
-    g_token = std.c.getenv("LICHESS_TOK") orelse @panic("LICHESS_TOK env var is required");
+    const token = std.c.getenv("LICHESS_TOK") orelse @panic("LICHESS_TOK env var is required");
+    // create a global list of headers we can use for every request
+    const auth_hdr = try std.fmt.allocPrintZ(heap, "Authorization: Bearer {s}", .{token});
+    defer heap.free(auth_hdr);
+    g_hdr_list = cURL.curl_slist_append(g_hdr_list, auth_hdr);
+    defer cURL.curl_slist_free_all(g_hdr_list);
 
     game_loop();
 
