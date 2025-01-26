@@ -396,29 +396,96 @@ fn work() void {
     }
 }
 
-const MAX_GAMES = 0; //TODO test and raise
+fn sq_str(sq: i64) [2]u8 {
+    if (sq < 0) {
+        @panic("Negative square passed to sq_str");
+    }
+    if (sq >= NUMSQ) {
+        @panic("Too large of sq passed to sq_str");
+    }
+
+    const rank = sq & (WIDTH - 1);
+    const file = sq >> (d.WIDTH_SHIFT);
+
+    var res: [2]u8 = undefined;
+
+    res[0] = "abcdefg"[@intCast(rank)];
+    res[1] = "12345678"[@intCast(file)];
+
+    return res;
+}
+
+const MAX_GAMES = 3; //TODO test and raise
 const MAX_POLFD = 1 + MAX_GAMES;
 const HOST = "lichess.org";
 const HTTPS_HOST = "https://" ++ HOST;
 const POLL_TIMEOUT = 15000;
+const MAX_ID_SZ = 0x10;
+
+const gameinfo = struct {
+    id: [MAX_ID_SZ]u8,
+    as_black: bool,
+};
 
 const game_write_ctx = struct {
     gamecount: usize,
     cmulti: *cURL.CURLM,
+    gameinfos: [MAX_GAMES]gameinfo,
 };
 
+// TODO wrap game_write_ctx in one that can be game stream specific
+
+fn send_req(path: [:0]const u8, is_post: bool) void {
+    var ec: cURL.CURLcode = undefined;
+    const chandle = cURL.curl_easy_init();
+    if (chandle == null) {
+        @panic("Cannot init easy curl handle");
+    }
+
+    defer cURL.curl_easy_cleanup(chandle);
+
+    if (is_post) {
+        _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POST, @as(c_long, 1));
+    } else {
+        _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_HTTPGET, @as(c_long, 1));
+    }
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POSTFIELDSIZE, @as(c_long, 0));
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_URL, path.ptr);
+    //_ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_VERBOSE, @as(c_int, 1));
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
+    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEFUNCTION, &ignore_data_cb);
+
+    ec = cURL.curl_easy_perform(chandle);
+    if (ec != cURL.CURLE_OK) {
+        std.debug.print("When trying to send {s} to {s}, got error code {}\n", .{ if (is_post) "post" else "get", path, ec });
+        return;
+    }
+
+    var response_code: c_long = 0;
+    _ = cURL.curl_easy_getinfo(chandle, cURL.CURLINFO_RESPONSE_CODE, &response_code);
+
+    std.debug.print("{s} = {}\n", .{ path, response_code });
+    if (response_code != 200) {
+        // do we need to drop the game or something
+        // probably should return an error
+        //TODO
+    }
+}
+
 fn send_move(game_id: [*:0]const u8, best_move_start: i8, best_move_end: i8) void {
-    //TODO
-    _ = game_id;
-    _ = best_move_start;
-    _ = best_move_end;
-    unreachable;
+    const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/bot/game/{s}/move/{s}{s}", .{ game_id, sq_str(best_move_start), sq_str(best_move_end) }) catch unreachable;
+    std.debug.print("Rejecting @ {s}\n", .{url});
+    defer heap.free(url);
+
+    send_req(url, true);
 }
 
 fn accept_challenge(id: []const u8) void {
-    _ = id;
-    //TODO
-    unreachable;
+    const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/challenge/{s}/accept", .{id}) catch unreachable;
+    std.debug.print("Rejecting @ {s}\n", .{url});
+    defer heap.free(url);
+
+    send_req(url, true);
 }
 
 fn ignore_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *anyopaque) callconv(.C) usize {
@@ -429,30 +496,11 @@ fn ignore_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *anyopaque) callconv(
 }
 
 fn reject_challenge(id: []const u8) void {
-    var ec: cURL.CURLcode = undefined;
-    const chandle = cURL.curl_easy_init();
-    if (chandle == null) {
-        @panic("Cannot init easy curl handle");
-    }
-
-    defer cURL.curl_easy_cleanup(chandle);
-
     const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/challenge/{s}/decline", .{id}) catch unreachable;
     std.debug.print("Rejecting @ {s}\n", .{url});
     defer heap.free(url);
 
-    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POST, @as(c_long, 1));
-    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POSTFIELDSIZE, @as(c_long, 0));
-    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_URL, url.ptr);
-    //_ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_VERBOSE, @as(c_int, 1));
-    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
-    _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEFUNCTION, &ignore_data_cb);
-
-    ec = cURL.curl_easy_perform(chandle);
-    if (ec != cURL.CURLE_OK) {
-        std.debug.print("When trying to reject {s}, got error code {}\n", .{ id, ec });
-        return;
-    }
+    send_req(url, true);
 }
 
 const stream_msg_type = struct {
@@ -461,10 +509,18 @@ const stream_msg_type = struct {
 
 // gameStart Start of a game
 // don't up game count, we do that in challenges
-//TODO
+const stream_msg_type_game_evt = struct {
+    type: []const u8,
+    game: struct {
+        id: []const u8,
+        //TODO what is fullId about?
+        color: []const u8,
+        // don't need to parse the fen here, we can use the game stream I think
+    },
+};
 
 // gameFinish Completion of a game
-// Don't care, just lower game count
+// match with gameStart
 
 // challenge A player sends you a challenge or you challenge someone
 // just need the id to accept the challenge or reject it
@@ -472,26 +528,35 @@ const stream_msg_type_challenge = struct {
     type: []const u8,
     challenge: struct {
         id: []const u8,
+        finalColor: []const u8,
     },
 };
 
 // challengeCanceled A player cancels their challenge to you
-// Don't care
+// match with challenge
 
 // challengeDeclined The opponent declines your challenge
 // Don't care
 
-// gameFull Full game data. All values are immutable, except for the state field.
-//TODO
-
 // gameState Current state of the game. Immutable values not included.
-//TODO
+const stream_msg_type_gamestate = struct {
+    type: []const u8,
+    moves: []const u8,
+    //TODO uh oh, there is no ID in this! We have to alter the ctx for the write per game?
+};
+
+// gameFull Full game data. All values are immutable, except for the state field.
+const stream_msg_type_gamefull = struct {
+    type: []const u8,
+    state: stream_msg_type_gamestate,
+    id: []const u8,
+};
 
 // chatLine Chat message sent by a user (or the bot itself) in the room "player" or "spectator".
 // Don't care
 
 // opponentGone Whether the opponent has left the game, and how long before you can claim a win or draw.
-//TODO
+// Don't care?
 
 fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ctx) callconv(.C) usize {
     // I thiiiiink this will always be in the same thread as game_loop
@@ -530,30 +595,158 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
         defer chal_data.deinit();
 
         if (gamectx.gamecount < MAX_GAMES) {
-            accept_challenge(chal_data.value.challenge.id);
+            // save the game info and accept it
+
+            for (0..gamectx.gameinfos.len) |gi_i| {
+                // find first with an empty id
+                if (gamectx.gameinfos[gi_i].id[0] != 0) {
+                    continue;
+                }
+                const idlen = chal_data.value.challenge.id.len;
+                @memcpy(gamectx.gameinfos[gi_i].id[0..idlen], chal_data.value.challenge.id);
+
+                gamectx.gameinfos[gi_i].as_black = true;
+                if (std.mem.eql(u8, chal_data.value.challenge.finalColor, "white")) {
+                    gamectx.gameinfos[gi_i].as_black = false;
+                }
+
+                break;
+            } else {
+                @panic("All slots taken on gameinfos?");
+            }
+
             gamectx.gamecount += 1;
+            accept_challenge(chal_data.value.challenge.id);
         } else {
             reject_challenge(chal_data.value.challenge.id);
         }
+    } else if (std.mem.eql(u8, msg_data.value.type, "challengeCanceled")) {
+        const chal_data = std.json.parseFromSlice(
+            stream_msg_type_challenge,
+            heap,
+            data,
+            .{ .ignore_unknown_fields = true },
+        ) catch @panic("unable to parse challenge msg");
+        defer chal_data.deinit();
+
+        // if we get a canceled challenge that we accepted, then we need to remove that from the gameinfos
+        for (0..gamectx.gameinfos.len) |gi_i| {
+            const idlen = chal_data.value.challenge.id.len;
+            if (std.mem.eql(u8, chal_data.value.challenge.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
+                gamectx.gameinfos[gi_i].id[0] = 0;
+                gamectx.gamecount -= 1;
+                break;
+            }
+        } else {
+            std.debug.print("Got a cancel for a challenge we haven't stored: {s}\n", .{chal_data.value.challenge.id});
+        }
+    } else if (std.mem.eql(u8, msg_data.value.type, "gameStart")) {
+        const game_data = std.json.parseFromSlice(
+            stream_msg_type_game_evt,
+            heap,
+            data,
+            .{ .ignore_unknown_fields = true },
+        ) catch @panic("unable to parse game event msg");
+
+        // check the color/id matches what we are storing
+        const idlen = game_data.value.game.id.len;
+        for (0..gamectx.gameinfos.len) |gi_i| {
+            if (std.mem.eql(u8, game_data.value.game.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
+                // found it, check the colors match
+
+                if (std.mem.eql(u8, game_data.value.game.color, "black") != gamectx.gameinfos[gi_i].as_black) {
+                    @panic("gameStart and Challenge colors do not match");
+                }
+                break;
+            }
+        } else {
+            std.debug.panic("Got a start for a game not from a challenge: {s}\n", .{game_data.value.game.id});
+            //TODO just add it if we can? might have been added by hand
+        }
+
+        // add the stream for a game start
+        // /api/bot/game/stream/{}
+        const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/bot/game/stream/{s}", .{game_data.value.game.id}) catch unreachable;
+        _ = add_stream(url, gamectx);
+        heap.free(url); // libcurl docs say we can free this immediately after the curl_easy_setopt
+    } else if (std.mem.eql(u8, msg_data.value.type, "gameFinish")) {
+        const game_data = std.json.parseFromSlice(
+            stream_msg_type_game_evt,
+            heap,
+            data,
+            .{ .ignore_unknown_fields = true },
+        ) catch @panic("unable to parse game event msg");
+
+        // close the game stream? Will that happen automatically for us?
+        //TODO test and see!
+
+        // remove the game from our tracked ids
+        const idlen = game_data.value.game.id.len;
+        for (0..gamectx.gameinfos.len) |gi_i| {
+            if (std.mem.eql(u8, game_data.value.game.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
+                gamectx.gameinfos[gi_i].id[0] = 0;
+                gamectx.gamecount -= 1;
+                break;
+            }
+        } else {
+            std.debug.panic("Got a finish for a game we haven't stored: {s}\n", .{game_data.value.game.id});
+        }
+    } else if ((std.mem.eql(u8, msg_data.value.type, "gameFull")) or (std.mem.eql(u8, msg_data.value.type, "gameState"))) {
+        // see if it is my turn or not
+        //TODO GameStateEvent doesn't have an id :(
+        // when we get a move, make a board and put it on the queue
         //TODO
     }
-
-    // add the stream for a game start
-    // /api/bot/game/stream/{}
-    //TODO
-
-    // when we get a move, make a board and put it on the queue
-    //TODO
 
     return nmemb;
 }
 
+fn add_stream(path: [:0]const u8, gamectx: *game_write_ctx) *cURL.CURL {
+    var ec: cURL.CURLcode = 0;
+    var mc: cURL.CURLMcode = 0;
+
+    const chandle = cURL.curl_easy_init() orelse @panic("Can't allocate curl handle");
+
+    ec = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_URL, path.ptr);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for url");
+    }
+
+    ec = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEFUNCTION, &game_loop_data_cb);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for writefunction");
+    }
+
+    ec = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEDATA, gamectx);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for writedata");
+    }
+
+    ec = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
+    if (ec != cURL.CURLE_OK) {
+        @panic("Setopt failed for headers");
+    }
+
+    mc = cURL.curl_multi_add_handle(gamectx.cmulti, chandle);
+    if (mc != cURL.CURLM_OK) {
+        @panic("failed to add initial curl handle");
+    }
+
+    return chandle;
+}
+
 fn game_loop() void {
-    var gamectx = .{
+    var gamectx: game_write_ctx = .{
         .gamecount = 0,
         .cmulti = cURL.curl_multi_init() orelse @panic("Can't init curl multi"),
+        .gameinfos = undefined,
     };
-    var ec: cURL.CURLcode = 0;
+
+    for (&gamectx.gameinfos) |*gi| {
+        // empty id means empty game
+        gi.id[0] = 0;
+    }
+
     var mc: cURL.CURLMcode = 0;
 
     defer {
@@ -565,34 +758,8 @@ fn game_loop() void {
 
     // get stream for overall events
     // /api/stream/event
-    const event_stream = cURL.curl_easy_init() orelse @panic("Can't allocate curl handle");
+    const event_stream = add_stream(HTTPS_HOST ++ "/api/stream/event", &gamectx);
     defer cURL.curl_easy_cleanup(event_stream);
-
-    // add options, such as CURLOPT_WRITEFUNCTION,
-    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_URL, HTTPS_HOST ++ "/api/stream/event");
-    if (ec != cURL.CURLE_OK) {
-        @panic("Setopt failed for url");
-    }
-
-    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_WRITEFUNCTION, &game_loop_data_cb);
-    if (ec != cURL.CURLE_OK) {
-        @panic("Setopt failed for writefunction");
-    }
-
-    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_WRITEDATA, &gamectx);
-    if (ec != cURL.CURLE_OK) {
-        @panic("Setopt failed for writedata");
-    }
-
-    ec = cURL.curl_easy_setopt(event_stream, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
-    if (ec != cURL.CURLE_OK) {
-        @panic("Setopt failed for headers");
-    }
-
-    mc = cURL.curl_multi_add_handle(gamectx.cmulti, event_stream);
-    if (mc != cURL.CURLM_OK) {
-        @panic("failed to add initial curl handle");
-    }
 
     // get all our ongoing games, and add them to our set
     // and for each of them that are awaiting our moves, make sure we will handle those?
