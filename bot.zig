@@ -396,6 +396,25 @@ fn work() void {
     }
 }
 
+fn queue_board(gameid: []const u8, board: *const d.Board) void {
+    _ = gameid;
+    _ = board;
+    //TODO
+}
+
+fn state_from_moves(moves: []const u8) d.Board {
+    var board: d.Board = undefined;
+    board.flags = d.START_FLAGS;
+    board.layout = d.START_LAYOUT;
+    board.occupied = d.START_OCCUPIED;
+    board.white_occupied = d.START_WHITE_OCCUPIED;
+
+    // progress the board with the moves
+    //TODO
+    _ = moves;
+    unreachable;
+}
+
 fn sq_str(sq: i64) [2]u8 {
     if (sq < 0) {
         @panic("Negative square passed to sq_str");
@@ -424,6 +443,7 @@ const MAX_ID_SZ = 0x10;
 
 const gameinfo = struct {
     id: [MAX_ID_SZ]u8,
+    idlen: usize,
     as_black: bool,
 };
 
@@ -431,6 +451,11 @@ const game_write_ctx = struct {
     gamecount: usize,
     cmulti: *cURL.CURLM,
     gameinfos: [MAX_GAMES]gameinfo,
+};
+
+const one_game_ctx = struct {
+    gameinfo: ?*gameinfo,
+    gamectx: *game_write_ctx,
 };
 
 // TODO wrap game_write_ctx in one that can be game stream specific
@@ -558,10 +583,11 @@ const stream_msg_type_gamefull = struct {
 // opponentGone Whether the opponent has left the game, and how long before you can claim a win or draw.
 // Don't care?
 
-fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ctx) callconv(.C) usize {
+fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) callconv(.C) usize {
     // I thiiiiink this will always be in the same thread as game_loop
     // so no locking needed on pointers in ctx
     const data = ptr[0..nmemb];
+    const gamectx: *game_write_ctx = ctx.gamectx;
 
     //DEBUG
     std.debug.print("Debug: {} {s}", .{ nmemb, data });
@@ -603,6 +629,7 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
                     continue;
                 }
                 const idlen = chal_data.value.challenge.id.len;
+                gamectx.gameinfos[gi_i].idlen = idlen;
                 @memcpy(gamectx.gameinfos[gi_i].id[0..idlen], chal_data.value.challenge.id);
 
                 gamectx.gameinfos[gi_i].as_black = true;
@@ -631,9 +658,10 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
 
         // if we get a canceled challenge that we accepted, then we need to remove that from the gameinfos
         for (0..gamectx.gameinfos.len) |gi_i| {
-            const idlen = chal_data.value.challenge.id.len;
+            const idlen = gamectx.gameinfos[gi_i].idlen;
             if (std.mem.eql(u8, chal_data.value.challenge.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
                 gamectx.gameinfos[gi_i].id[0] = 0;
+                gamectx.gameinfos[gi_i].idlen = 0;
                 gamectx.gamecount -= 1;
                 break;
             }
@@ -648,10 +676,16 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
             .{ .ignore_unknown_fields = true },
         ) catch @panic("unable to parse game event msg");
 
+        // allocate the new one_game_ctx
+        var newctx: *one_game_ctx = heap.create(one_game_ctx) catch unreachable;
+        newctx.gamectx = gamectx;
+
         // check the color/id matches what we are storing
-        const idlen = game_data.value.game.id.len;
         for (0..gamectx.gameinfos.len) |gi_i| {
+            const idlen = gamectx.gameinfos[gi_i].idlen;
             if (std.mem.eql(u8, game_data.value.game.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
+                newctx.gameinfo = &gamectx.gameinfos[gi_i];
+
                 // found it, check the colors match
 
                 if (std.mem.eql(u8, game_data.value.game.color, "black") != gamectx.gameinfos[gi_i].as_black) {
@@ -667,7 +701,8 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
         // add the stream for a game start
         // /api/bot/game/stream/{}
         const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/bot/game/stream/{s}", .{game_data.value.game.id}) catch unreachable;
-        _ = add_stream(url, gamectx);
+
+        _ = add_stream(url, newctx);
         heap.free(url); // libcurl docs say we can free this immediately after the curl_easy_setopt
     } else if (std.mem.eql(u8, msg_data.value.type, "gameFinish")) {
         const game_data = std.json.parseFromSlice(
@@ -678,12 +713,15 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
         ) catch @panic("unable to parse game event msg");
 
         // close the game stream? Will that happen automatically for us?
+        // if not this is a problem since those streams still have pointers to this slot
+        // we could store the handle in the gameinfo?
         //TODO test and see!
 
         // remove the game from our tracked ids
-        const idlen = game_data.value.game.id.len;
         for (0..gamectx.gameinfos.len) |gi_i| {
+            const idlen = gamectx.gameinfos[gi_i].idlen;
             if (std.mem.eql(u8, game_data.value.game.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
+                gamectx.gameinfos[gi_i].idlen = 0;
                 gamectx.gameinfos[gi_i].id[0] = 0;
                 gamectx.gamecount -= 1;
                 break;
@@ -692,16 +730,51 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, gamectx: *game_write_ct
             std.debug.panic("Got a finish for a game we haven't stored: {s}\n", .{game_data.value.game.id});
         }
     } else if ((std.mem.eql(u8, msg_data.value.type, "gameFull")) or (std.mem.eql(u8, msg_data.value.type, "gameState"))) {
+        // this one should have a ctx.gameinfo that is non-null
+        if (ctx.gameinfo == null) {
+            @panic("Game streams should have a gameinfo allocated");
+        }
+
+        var state_data: stream_msg_type_gamestate = undefined;
+        if (std.mem.eql(u8, msg_data.value.type, "gameFull")) {
+            const fullgame_data = std.json.parseFromSlice(
+                stream_msg_type_gamefull,
+                heap,
+                data,
+                .{ .ignore_unknown_fields = true },
+            ) catch @panic("unable to parse gamefull msg");
+
+            const idlen = ctx.gameinfo.?.idlen;
+            if (!std.mem.eql(u8, fullgame_data.value.id, ctx.gameinfo.?.id[0..idlen])) {
+                @panic("id does not match in fullgame data");
+            }
+
+            state_data = fullgame_data.value.state;
+        } else {
+            // get the state
+            const stategame_data = std.json.parseFromSlice(
+                stream_msg_type_gamestate,
+                heap,
+                data,
+                .{ .ignore_unknown_fields = true },
+            ) catch @panic("unable to parse game state msg");
+
+            state_data = stategame_data.value;
+        }
+
+        const board = state_from_moves(state_data.moves);
+
         // see if it is my turn or not
-        //TODO GameStateEvent doesn't have an id :(
-        // when we get a move, make a board and put it on the queue
-        //TODO
+        if (board.flags.black_turn == ctx.gameinfo.?.as_black) {
+            // when we get a move, make a board and put it on the queue
+            queue_board(ctx.gameinfo.?.id[0..ctx.gameinfo.?.idlen], &board);
+        }
     }
 
     return nmemb;
 }
 
-fn add_stream(path: [:0]const u8, gamectx: *game_write_ctx) *cURL.CURL {
+fn add_stream(path: [:0]const u8, ctx: *one_game_ctx) *cURL.CURL {
     var ec: cURL.CURLcode = 0;
     var mc: cURL.CURLMcode = 0;
 
@@ -717,7 +790,7 @@ fn add_stream(path: [:0]const u8, gamectx: *game_write_ctx) *cURL.CURL {
         @panic("Setopt failed for writefunction");
     }
 
-    ec = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEDATA, gamectx);
+    ec = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEDATA, ctx);
     if (ec != cURL.CURLE_OK) {
         @panic("Setopt failed for writedata");
     }
@@ -727,7 +800,7 @@ fn add_stream(path: [:0]const u8, gamectx: *game_write_ctx) *cURL.CURL {
         @panic("Setopt failed for headers");
     }
 
-    mc = cURL.curl_multi_add_handle(gamectx.cmulti, chandle);
+    mc = cURL.curl_multi_add_handle(ctx.gamectx.cmulti, chandle);
     if (mc != cURL.CURLM_OK) {
         @panic("failed to add initial curl handle");
     }
@@ -742,15 +815,21 @@ fn game_loop() void {
         .gameinfos = undefined,
     };
 
-    for (&gamectx.gameinfos) |*gi| {
+    var ctx: one_game_ctx = .{
+        .gameinfo = null,
+        .gamectx = &gamectx,
+    };
+
+    for (&ctx.gamectx.gameinfos) |*gi| {
         // empty id means empty game
         gi.id[0] = 0;
+        gi.idlen = 0;
     }
 
     var mc: cURL.CURLMcode = 0;
 
     defer {
-        mc = cURL.curl_multi_cleanup(gamectx.cmulti);
+        mc = cURL.curl_multi_cleanup(ctx.gamectx.cmulti);
         if (mc != cURL.CURLM_OK) {
             std.debug.print("Error cleaning up curl multi: {}\n", .{mc});
         }
@@ -758,7 +837,7 @@ fn game_loop() void {
 
     // get stream for overall events
     // /api/stream/event
-    const event_stream = add_stream(HTTPS_HOST ++ "/api/stream/event", &gamectx);
+    const event_stream = add_stream(HTTPS_HOST ++ "/api/stream/event", &ctx);
     defer cURL.curl_easy_cleanup(event_stream);
 
     // get all our ongoing games, and add them to our set
@@ -775,11 +854,11 @@ fn game_loop() void {
     var remaining: c_int = 0;
 
     while (still_running != 0) {
-        mc = cURL.curl_multi_perform(gamectx.cmulti, &still_running);
+        mc = cURL.curl_multi_perform(ctx.gamectx.cmulti, &still_running);
 
         if (mc == cURL.CURLM_OK and still_running != 0) {
             // poll on the handles
-            mc = cURL.curl_multi_wait(gamectx.cmulti, null, 0, POLL_TIMEOUT, &numfds);
+            mc = cURL.curl_multi_wait(ctx.gamectx.cmulti, null, 0, POLL_TIMEOUT, &numfds);
         }
 
         if (mc != cURL.CURLM_OK) {
@@ -788,7 +867,7 @@ fn game_loop() void {
 
         remaining = 1;
         while (remaining > 0) {
-            const msg = cURL.curl_multi_info_read(gamectx.cmulti, &remaining);
+            const msg = cURL.curl_multi_info_read(ctx.gamectx.cmulti, &remaining);
             if (msg == null) {
                 break;
             }
@@ -807,7 +886,7 @@ fn game_loop() void {
 
             // if it is a game stream, remove it
             // and cancel any moves waiting to be sent?
-            mc = cURL.curl_multi_remove_handle(gamectx.cmulti, msg.*.easy_handle);
+            mc = cURL.curl_multi_remove_handle(ctx.gamectx.cmulti, msg.*.easy_handle);
             if (mc != cURL.CURLM_OK) {
                 std.debug.panic("Unhandled multi error when removing handle: {}", .{mc});
             }

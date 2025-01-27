@@ -34,12 +34,36 @@ pub const BoardFlags = packed struct {
     b_can_ooo: bool,
 };
 
+pub const START_FLAGS: BoardFlags = .{
+    .enpassant_sq = 0,
+    .black_turn = false,
+    .w_can_oo = true,
+    .w_can_ooo = true,
+    .b_can_oo = true,
+    .b_can_ooo = true,
+};
+
 pub const Board = struct {
     flags: BoardFlags,
     layout: [NUMSQ]Piece,
     occupied: u64,
     white_occupied: u64,
 };
+
+pub const START_LAYOUT: [NUMSQ]Piece = [NUMSQ]Piece{
+    Piece.w_rook, Piece.w_knight, Piece.w_bishop, Piece.w_queen, Piece.w_king, Piece.w_bishop, Piece.w_knight, Piece.w_rook,
+    Piece.w_pawn, Piece.w_pawn,   Piece.w_pawn,   Piece.w_pawn,  Piece.w_pawn, Piece.w_pawn,   Piece.w_pawn,   Piece.w_pawn,
+    Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,   Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,
+    Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,   Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,
+    Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,   Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,
+    Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,   Piece.empty,  Piece.empty,    Piece.empty,    Piece.empty,
+    Piece.b_pawn, Piece.b_pawn,   Piece.b_pawn,   Piece.b_pawn,  Piece.b_pawn, Piece.b_pawn,   Piece.b_pawn,   Piece.b_pawn,
+    Piece.b_rook, Piece.b_knight, Piece.b_bishop, Piece.b_queen, Piece.b_king, Piece.b_bishop, Piece.b_knight, Piece.b_rook,
+};
+
+pub const START_OCCUPIED: u64 = 0b11111111_11111111_00000000_00000000_00000000_00000000_11111111_11111111;
+
+pub const START_WHITE_OCCUPIED: u64 = 0b00000000_00000000_00000000_00000000_00000000_00000000_11111111_11111111;
 
 pub const NUMPIECETYPES = 12;
 pub const MAX_ENEMIES = 16;
