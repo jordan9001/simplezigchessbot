@@ -15,10 +15,12 @@ const heap = std.heap.c_allocator;
 const state_node = struct {
     board: d.Board,
     depth: u16,
+    target_depth: u16,
     parent: ?*state_node,
     move_start: i8,
     move_end: i8,
-    game_id: [*:0]const u8,
+    game_id: [MAX_ID_SZ]u8,
+    game_id_sz: u16,
 
     mux: std.Thread.Mutex, // this mux protects below items
     best_eval: f32,
@@ -108,7 +110,7 @@ fn evaluate(board: *d.Board) f32 {
     return (pos_luts * 1.0) + (piece_balance * 2100.0);
 }
 
-fn expand(state: *state_node, link_parent: bool) bool {
+fn expand(state: *state_node) bool {
     var expanded = false;
     // given a position, go another layer down
     // adding new states to explore to our queue
@@ -244,15 +246,15 @@ fn expand(state: *state_node, link_parent: bool) bool {
             newnode.data.best_move_end = -1;
             newnode.data.live_children = 0;
 
-            newnode.data.game_id = state.game_id;
+            @memcpy(&newnode.data.game_id, &state.game_id);
+            newnode.data.game_id_sz = state.game_id_sz;
             newnode.data.move_start = @intCast(sq);
             newnode.data.move_end = @intCast(movesq);
 
             newnode.data.depth = state.depth + 1;
-            newnode.data.parent = null;
-            if (link_parent) {
-                newnode.data.parent = state;
-            }
+            //TODO increase target depth for certain high priority moves?
+            newnode.data.target_depth = state.target_depth;
+            newnode.data.parent = state;
 
             newnode.data.board = state.board;
             newnode.data.board.flags.black_turn = !w_turn;
@@ -287,10 +289,8 @@ fn expand(state: *state_node, link_parent: bool) bool {
 var work_ready_sem = std.Thread.Semaphore{};
 const WorkQueue = std.DoublyLinkedList(state_node);
 var work_queue = WorkQueue{};
-var work_queue_mux = std.Thread.Mutex{}; // TODO better as a futex?
+var work_queue_mux = std.Thread.Mutex{};
 
-//TODO going to have to make this movable
-const TARGET_DEPTH = 3;
 var shutdown: bool = false;
 
 fn work() void {
@@ -312,8 +312,8 @@ fn work() void {
         work_queue_mux.unlock();
 
         // expand it if it needs expanding
-        if (node.data.depth < TARGET_DEPTH) {
-            if (expand(&node.data, true)) {
+        if (node.data.depth < node.data.target_depth) {
+            if (expand(&node.data)) {
                 // added children to the queue, we can drop this and grab more work
                 continue;
             }
@@ -380,7 +380,7 @@ fn work() void {
                 // this is safe because we can only reach this if we were the last child up
                 // right?
 
-                send_move(cnode.game_id, cnode.best_move_start, cnode.best_move_end);
+                send_move(&cnode.game_id, cnode.best_move_start, cnode.best_move_end);
 
                 // free it as well, now that we are done with it
                 const roottofree: *WorkQueue.Node = @fieldParentPtr("data", cnode);
@@ -396,10 +396,33 @@ fn work() void {
     }
 }
 
-fn queue_board(gameid: []const u8, board: *const d.Board) void {
-    _ = gameid;
-    _ = board;
-    //TODO
+fn queue_board(gameid: []const u8, board: *const d.Board, target_depth: u16) void {
+    const newnode: *WorkQueue.Node = heap.create(WorkQueue.Node) catch unreachable;
+
+    newnode.data.mux = .{};
+    newnode.data.best_eval = 0;
+    newnode.data.best_move_start = -1;
+    newnode.data.best_move_end = -1;
+    newnode.data.live_children = 0;
+
+    @memset(&newnode.data.game_id, 0);
+    @memcpy(&newnode.data.game_id, gameid);
+    newnode.data.game_id_sz = @intCast(gameid.len);
+    newnode.data.move_start = -1;
+    newnode.data.move_end = -1;
+
+    newnode.data.depth = 0;
+    //TODO increase target depth for certain high priority moves?
+    newnode.data.target_depth = target_depth;
+    newnode.data.parent = null;
+
+    newnode.data.board = board.*;
+
+    work_queue_mux.lock();
+    work_queue.append(newnode);
+    work_queue_mux.unlock();
+
+    work_ready_sem.post();
 }
 
 fn state_from_moves(moves: []const u8) d.Board {
@@ -410,9 +433,123 @@ fn state_from_moves(moves: []const u8) d.Board {
     board.white_occupied = d.START_WHITE_OCCUPIED;
 
     // progress the board with the moves
-    //TODO
-    _ = moves;
-    unreachable;
+    var c: []const u8 = moves;
+    var src: usize = 0;
+    var dst: usize = 0;
+
+    while (c.len > 0) {
+        while (c[0] == ' ') : (c = c[1..]) {}
+
+        src = @intCast(str_sq(c));
+        c = c[2..];
+        dst = @intCast(str_sq(c));
+        c = c[2..];
+
+        // handle castling
+        // we don't have to make sure it is legal, just handle it and flags
+        // no need for checking in between spaces
+        if (board.layout[src] == d.Piece.b_rook and src == 0x3c) {
+            board.flags.b_can_ooo = false;
+        } else if (board.layout[src] == d.Piece.b_rook and src == 0x3f) {
+            board.flags.b_can_oo = false;
+        } else if (board.layout[src] == d.Piece.w_rook and src == 0x00) {
+            board.flags.w_can_ooo = false;
+        } else if (board.layout[src] == d.Piece.w_rook and src == 0x07) {
+            board.flags.w_can_oo = false;
+        } else if (board.layout[src] == d.Piece.b_king) {
+            board.flags.b_can_ooo = false;
+            board.flags.b_can_oo = false;
+
+            if (src == 0x3c) {
+                if (dst == 0x38) {
+                    // long
+                    board.layout[0x38] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x38));
+                    board.layout[0x3a] = d.Piece.b_king;
+                    board.occupied |= (1 << 0x3a);
+                    board.layout[0x3b] = d.Piece.b_rook;
+                    board.occupied |= (1 << 0x3b);
+                    board.layout[0x3c] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x3c));
+
+                    continue;
+                } else if (dst == 0x3f) {
+                    // short
+                    board.layout[0x3f] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x3f));
+                    board.layout[0x3e] = d.Piece.b_king;
+                    board.occupied |= (1 << 0x3e);
+                    board.layout[0x3d] = d.Piece.b_rook;
+                    board.occupied |= (1 << 0x3d);
+                    board.layout[0x3c] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x3c));
+
+                    continue;
+                }
+            }
+        } else if (board.layout[src] == d.Piece.w_king and src == 0x04) {
+            board.flags.w_can_ooo = false;
+            board.flags.w_can_oo = false;
+
+            if (src == 0x04) {
+                if (dst == 0x00) {
+                    // long
+                    board.layout[0x00] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x00));
+                    board.white_occupied &= ~(@as(u64, 1 << 0x00));
+                    board.layout[0x02] = d.Piece.w_king;
+                    board.occupied |= (1 << 0x02);
+                    board.white_occupied |= (1 << 0x02);
+                    board.layout[0x03] = d.Piece.w_rook;
+                    board.occupied |= (1 << 0x03);
+                    board.white_occupied |= (1 << 0x03);
+                    board.layout[0x04] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x04));
+                    board.white_occupied &= ~(@as(u64, 1 << 0x04));
+
+                    continue;
+                } else if (dst == 0x07) {
+                    // short
+                    board.layout[0x07] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x07));
+                    board.white_occupied &= ~(@as(u64, 1 << 0x07));
+                    board.layout[0x06] = d.Piece.w_king;
+                    board.occupied |= (1 << 0x06);
+                    board.white_occupied |= (1 << 0x06);
+                    board.layout[0x05] = d.Piece.w_rook;
+                    board.occupied |= (1 << 0x05);
+                    board.white_occupied |= (1 << 0x05);
+                    board.layout[0x04] = d.Piece.empty;
+                    board.occupied &= ~(@as(u64, 1 << 0x04));
+                    board.white_occupied &= ~(@as(u64, 1 << 0x04));
+
+                    continue;
+                }
+            }
+        }
+
+        // handle marking flags for enpassantable
+        //TODO
+
+        // handle promotion
+        if (c.len > 0 and c[0] != ' ') {
+            //TODO
+
+            c = c[1..];
+        }
+
+        // make the move
+        board.layout[dst] = board.layout[src];
+        board.layout[src] = d.Piece.empty;
+        board.occupied |= @as(u64, @as(u64, 1) << @intCast(dst));
+        board.occupied &= ~(@as(u64, @as(u64, 1) << @intCast(src)));
+        if (board.layout[dst].is_white()) {
+            board.white_occupied |= @as(u64, @as(u64, 1) << @intCast(dst));
+            board.white_occupied &= ~(@as(u64, @as(u64, 1) << @intCast(src)));
+        }
+    }
+
+    return board;
 }
 
 fn sq_str(sq: i64) [2]u8 {
@@ -433,7 +570,20 @@ fn sq_str(sq: i64) [2]u8 {
 
     return res;
 }
+fn str_sq(s: []const u8) i8 {
+    if (s[0] > 'g' or s[0] < 'a') {
+        unreachable;
+    }
+    if (s[1] > '8' or s[1] < '1') {
+        unreachable;
+    }
 
+    var sq: i8 = @intCast(s[0] - 'a');
+    sq += @intCast((s[1] - '1') << d.WIDTH_SHIFT);
+    return sq;
+}
+
+const DEFAULT_DEPTH = 1; //TODO test and expand
 const MAX_GAMES = 3; //TODO test and raise
 const MAX_POLFD = 1 + MAX_GAMES;
 const HOST = "lichess.org";
@@ -457,8 +607,6 @@ const one_game_ctx = struct {
     gameinfo: ?*gameinfo,
     gamectx: *game_write_ctx,
 };
-
-// TODO wrap game_write_ctx in one that can be game stream specific
 
 fn send_req(path: [:0]const u8, is_post: bool) void {
     var ec: cURL.CURLcode = undefined;
@@ -497,9 +645,9 @@ fn send_req(path: [:0]const u8, is_post: bool) void {
     }
 }
 
-fn send_move(game_id: [*:0]const u8, best_move_start: i8, best_move_end: i8) void {
+fn send_move(game_id: []const u8, best_move_start: i8, best_move_end: i8) void {
     const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/bot/game/{s}/move/{s}{s}", .{ game_id, sq_str(best_move_start), sq_str(best_move_end) }) catch unreachable;
-    std.debug.print("Rejecting @ {s}\n", .{url});
+    std.debug.print("Sending @ {s}\n", .{url});
     defer heap.free(url);
 
     send_req(url, true);
@@ -507,7 +655,7 @@ fn send_move(game_id: [*:0]const u8, best_move_start: i8, best_move_end: i8) voi
 
 fn accept_challenge(id: []const u8) void {
     const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/challenge/{s}/accept", .{id}) catch unreachable;
-    std.debug.print("Rejecting @ {s}\n", .{url});
+    std.debug.print("Accepting @ {s}\n", .{url});
     defer heap.free(url);
 
     send_req(url, true);
@@ -567,7 +715,6 @@ const stream_msg_type_challenge = struct {
 const stream_msg_type_gamestate = struct {
     type: []const u8,
     moves: []const u8,
-    //TODO uh oh, there is no ID in this! We have to alter the ctx for the write per game?
 };
 
 // gameFull Full game data. All values are immutable, except for the state field.
@@ -767,7 +914,7 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
         // see if it is my turn or not
         if (board.flags.black_turn == ctx.gameinfo.?.as_black) {
             // when we get a move, make a board and put it on the queue
-            queue_board(ctx.gameinfo.?.id[0..ctx.gameinfo.?.idlen], &board);
+            queue_board(ctx.gameinfo.?.id[0..ctx.gameinfo.?.idlen], &board, DEFAULT_DEPTH);
         }
     }
 
@@ -911,6 +1058,7 @@ pub fn main() !void {
 
     //var threads: [std.Thread.getCpuCount() - 3]std.Thread = undefined;
     //DEBUG
+    //TODO up this and expand
     var threads: [1]std.Thread = undefined;
 
     const spawn_config = std.Thread.SpawnConfig{};
