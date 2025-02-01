@@ -11,11 +11,11 @@ all: $(EXE)
 %.o: %.zig
 	$(ZG) build-obj $^ $(LIBS)
 
-$(EXE): bot.o luts.o
+$(EXE): main.o luts.o
 	$(ZG) build-exe -femit-bin=$@ $^ $(LIBS)
 
 build-clean:
-	rm -f bot.o
+	rm -f main.o
 	rm -f *.o.o
 
 clean: build-clean
