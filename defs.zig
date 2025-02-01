@@ -70,14 +70,17 @@ pub const MAX_ENEMIES = 16;
 pub const MAX_PIECES = MAX_ENEMIES * 2;
 pub const LUT_MIN_ENEMIES = 1;
 pub const LUT_MIN_PIECES = 3;
-pub const DEFAULT_DEPTH = 4;
 pub const MAX_ID_SZ = 0x10;
 
 pub const gameinfo = struct {
     id: [MAX_ID_SZ]u8,
     idlen: usize,
     as_black: bool,
+    board_start: Board,
 };
+
+pub var default_depth: u16 = 4;
+pub var debug_mode: bool = false;
 
 pub const value_by_num_enemies_t = [MAX_ENEMIES + 1 - LUT_MIN_ENEMIES][NUMPIECETYPES][NUMSQ]i16;
 pub const value_by_num_pieces_t = [MAX_PIECES + 1 - LUT_MIN_PIECES][NUMPIECETYPES][NUMSQ]i16;

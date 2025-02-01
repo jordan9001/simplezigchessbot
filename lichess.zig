@@ -41,7 +41,7 @@ const stream_msg_type_game_evt = struct {
         id: []const u8,
         //TODO what is fullId about?
         color: []const u8,
-        // don't need to parse the fen here, we can use the game stream I think
+        fen: []const u8,
     },
 };
 
@@ -99,9 +99,12 @@ fn send_req(path: [:0]const u8, is_post: bool) void {
     }
     _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_POSTFIELDSIZE, @as(c_long, 0));
     _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_URL, path.ptr);
-    //_ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_VERBOSE, @as(c_int, 1));
     _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_HTTPHEADER, g_hdr_list.?);
     _ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_WRITEFUNCTION, &ignore_data_cb);
+
+    if (d.debug_mode) {
+        //_ = cURL.curl_easy_setopt(chandle, cURL.CURLOPT_VERBOSE, @as(c_int, 1));
+    }
 
     ec = cURL.curl_easy_perform(chandle);
     if (ec != cURL.CURLE_OK) {
@@ -190,54 +193,15 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
         defer chal_data.deinit();
 
         if (gamectx.gamecount < MAX_GAMES) {
-            // save the game info and accept it
-
-            for (0..gamectx.gameinfos.len) |gi_i| {
-                // find first with an empty id
-                if (gamectx.gameinfos[gi_i].id[0] != 0) {
-                    continue;
-                }
-                const idlen = chal_data.value.challenge.id.len;
-                gamectx.gameinfos[gi_i].idlen = idlen;
-                @memcpy(gamectx.gameinfos[gi_i].id[0..idlen], chal_data.value.challenge.id);
-
-                gamectx.gameinfos[gi_i].as_black = false;
-                // final color applies to the challenger, not us?
-                if (std.mem.eql(u8, chal_data.value.challenge.finalColor, "white")) {
-                    gamectx.gameinfos[gi_i].as_black = true;
-                }
-
-                break;
-            } else {
-                @panic("All slots taken on gameinfos?");
-            }
-
-            gamectx.gamecount += 1;
+            // just accept it
+            // there is a race on the gamecount this way, but TODO
             accept_challenge(chal_data.value.challenge.id);
         } else {
             reject_challenge(chal_data.value.challenge.id);
         }
     } else if (std.mem.eql(u8, msg_data.value.type, "challengeCanceled")) {
-        const chal_data = std.json.parseFromSlice(
-            stream_msg_type_challenge,
-            heap,
-            data,
-            .{ .ignore_unknown_fields = true },
-        ) catch @panic("unable to parse challenge msg");
-        defer chal_data.deinit();
+        // okay whatever
 
-        // if we get a canceled challenge that we accepted, then we need to remove that from the gameinfos
-        for (0..gamectx.gameinfos.len) |gi_i| {
-            const idlen = gamectx.gameinfos[gi_i].idlen;
-            if (std.mem.eql(u8, chal_data.value.challenge.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
-                gamectx.gameinfos[gi_i].id[0] = 0;
-                gamectx.gameinfos[gi_i].idlen = 0;
-                gamectx.gamecount -= 1;
-                break;
-            }
-        } else {
-            std.debug.print("Got a cancel for a challenge we haven't stored: {s}\n", .{chal_data.value.challenge.id});
-        }
     } else if (std.mem.eql(u8, msg_data.value.type, "gameStart")) {
         const game_data = std.json.parseFromSlice(
             stream_msg_type_game_evt,
@@ -250,23 +214,33 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
         var newctx: *one_game_ctx = heap.create(one_game_ctx) catch unreachable;
         newctx.gamectx = gamectx;
 
-        // check the color/id matches what we are storing
         for (0..gamectx.gameinfos.len) |gi_i| {
-            const idlen = gamectx.gameinfos[gi_i].idlen;
-            if (std.mem.eql(u8, game_data.value.game.id, gamectx.gameinfos[gi_i].id[0..idlen])) {
-                newctx.gameinfo = &gamectx.gameinfos[gi_i];
-
-                // found it, check the colors match
-
-                if (std.mem.eql(u8, game_data.value.game.color, "black") != gamectx.gameinfos[gi_i].as_black) {
-                    @panic("gameStart and Challenge colors do not match");
-                }
-                break;
+            // find first with an empty id
+            if (gamectx.gameinfos[gi_i].id[0] != 0) {
+                continue;
             }
+
+            newctx.gameinfo = &gamectx.gameinfos[gi_i];
+
+            const idlen = game_data.value.game.id.len;
+            gamectx.gameinfos[gi_i].idlen = idlen;
+            @memset(gamectx.gameinfos[gi_i].id[0..], 0);
+            @memcpy(gamectx.gameinfos[gi_i].id[0..idlen], game_data.value.game.id);
+
+            gamectx.gameinfos[gi_i].as_black = true;
+            if (std.mem.eql(u8, game_data.value.game.color, "white")) {
+                gamectx.gameinfos[gi_i].as_black = false;
+            }
+
+            break;
         } else {
-            std.debug.panic("Got a start for a game not from a challenge: {s}\n", .{game_data.value.game.id});
-            //TODO just add it if we can? might have been added by hand
+            @panic("All slots taken on gameinfos, race from challenges?");
         }
+
+        gamectx.gamecount += 1;
+
+        //TODO parse FEN for initial state
+        newctx.gameinfo.?.board_start = bot.parse_fen(game_data.value.game.fen);
 
         // add the stream for a game start
         // /api/bot/game/stream/{}
@@ -341,7 +315,7 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
             state_data = stategame_data.value;
         }
 
-        const board = bot.state_from_moves(state_data.moves);
+        const board = bot.state_from_moves(state_data.moves, ctx.gameinfo.?);
 
         // see if it is my turn or not
         std.debug.print("board_turn = {}, gi_black = {}\n", .{ board.flags.black_turn, ctx.gameinfo.?.as_black });
@@ -395,7 +369,7 @@ fn game_loop() void {
         .cmulti = cURL.curl_multi_init() orelse @panic("Can't init curl multi"),
         .gameinfos = undefined,
         .add_stream_queue = StreamQueue{},
-        .target_depth = d.DEFAULT_DEPTH, // TODO make this a param
+        .target_depth = d.default_depth,
     };
 
     var ctx: one_game_ctx = .{

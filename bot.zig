@@ -318,12 +318,13 @@ pub fn work() void {
 
         work_queue_mux.unlock();
 
-        //DEBUG
-        //if (node.data.move_start < 0) {
-        //    std.debug.print("Working on root node\n", .{});
-        //} else {
-        //    std.debug.print("Working on node {} {s}{s}\n", .{ node.data.depth, sq_str(node.data.move_start), sq_str(node.data.move_end) });
-        //}
+        if (d.debug_mode) {
+            if (node.data.move_start < 0) {
+                std.debug.print("Working on root node\n", .{});
+            } else {
+                std.debug.print("Working on node {} {s}{s}\n", .{ node.data.depth, sq_str(node.data.move_start), sq_str(node.data.move_end) });
+            }
+        }
 
         // expand it if it needs expanding
         if (node.data.depth < node.data.target_depth) {
@@ -443,12 +444,16 @@ pub fn queue_board(gameid: []const u8, board: *const d.Board, target_depth: u16)
     std.debug.print("Queued board\n", .{});
 }
 
-pub fn state_from_moves(moves: []const u8) d.Board {
-    var board: d.Board = undefined;
-    board.flags = d.START_FLAGS;
-    board.layout = d.START_LAYOUT;
-    board.occupied = d.START_OCCUPIED;
-    board.white_occupied = d.START_WHITE_OCCUPIED;
+pub fn parse_fen(fen: []const u8) d.Board {
+
+    //TODO
+
+    _ = fen;
+    unreachable;
+}
+
+pub fn state_from_moves(moves: []const u8, gi: *d.gameinfo) d.Board {
+    var board: d.Board = gi.board_start;
 
     // progress the board with the moves
     var c: []const u8 = moves;

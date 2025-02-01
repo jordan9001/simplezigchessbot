@@ -2,16 +2,43 @@ const std = @import("std");
 
 const bot = @import("./bot.zig");
 const lic = @import("./lichess.zig");
+const d = @import("./defs.zig");
 
 const heap = std.heap.c_allocator;
 
+fn usage() noreturn {
+    std.debug.print("Unknown argument\n", .{}); //TODO
+    std.process.exit(255);
+}
+
 pub fn main() !void {
-    //TODO move lichess stuff to own file
-    //TODO add dbg verbosity level param
     //TODO add param for number of threads
-    //TODO add param for depth
-    //TODO add param for FEN test case
     //TODO accept new games from gameStart and parse FEN for initial start point
+
+    var args = try std.process.argsWithAllocator(heap);
+    while (args.next()) |arg| {
+        if (arg[0] != '-') {
+            usage();
+            return;
+        }
+
+        switch (arg[1]) {
+            'v' => {
+                d.debug_mode = true;
+            },
+            'd' => {
+                const a = args.next();
+                if (a == null) {
+                    usage();
+                }
+
+                d.default_depth = std.fmt.parseUnsigned(u16, a.?, 0) catch usage();
+            },
+            else => usage(),
+        }
+    }
+
+    args.deinit();
 
     std.debug.print("Starting up\n", .{});
 
@@ -26,6 +53,7 @@ pub fn main() !void {
 
     // start the lichess game
     //TODO add a debug mode that does not use lichess
+    // for now we can just use the lichess board editor and debug prints
     lic.game();
 
     // done, signal the workers and wait for them to finish
