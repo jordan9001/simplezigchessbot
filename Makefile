@@ -8,7 +8,10 @@ LIBS=-lc $(shell curl-config --libs)
 
 all: $(EXE)
 
-%.o: %.zig
+main.o: main.zig defs.zig lichess.zig bot.zig
+	$(ZG) build-obj $< $(LIBS)
+
+luts.o: luts.zig
 	$(ZG) build-obj $^ $(LIBS)
 
 $(EXE): main.o luts.o

@@ -378,7 +378,9 @@ pub fn work() void {
             cnode.live_children -= 1;
             cnode.mux.unlock();
 
-            //std.debug.print("Parent pbest {}, now {}\n", .{ pbest, cnode.best_eval });
+            if (d.debug_mode) {
+                std.debug.print("Parent pbest {}, now {}\n", .{ pbest, cnode.best_eval });
+            }
 
             // free the lower node
             const tofree: *WorkQueue.Node = @fieldParentPtr("data", pnode);
@@ -398,6 +400,8 @@ pub fn work() void {
                 // right?
 
                 (send_move_f.?)(cnode.game_id[0..cnode.game_id_sz], cnode.best_move_start, cnode.best_move_end);
+
+                std.debug.print("Evaluated at {}\n", .{cnode.best_eval});
 
                 // free it as well, now that we are done with it
                 const roottofree: *WorkQueue.Node = @fieldParentPtr("data", cnode);
@@ -445,11 +449,120 @@ pub fn queue_board(gameid: []const u8, board: *const d.Board, target_depth: u16)
 }
 
 pub fn parse_fen(fen: []const u8) d.Board {
+    //TODO return errors, don't panic
+    var out: d.Board = undefined;
+    out.occupied = 0;
+    out.white_occupied = 0;
+    out.flags.enpassant_sq = 0;
+    out.flags.w_can_oo = false;
+    out.flags.w_can_ooo = false;
+    out.flags.b_can_oo = false;
+    out.flags.b_can_ooo = false;
 
-    //TODO
+    var c = fen;
 
-    _ = fen;
-    unreachable;
+    var rank: i32 = 7;
+    while (rank >= 0) : (rank -= 1) {
+        // parse a line
+        var file_count: usize = 0;
+        while (file_count < d.WIDTH) {
+            const p = switch (c[0]) {
+                'p' => d.Piece.b_pawn,
+                'n' => d.Piece.b_knight,
+                'b' => d.Piece.b_bishop,
+                'r' => d.Piece.b_rook,
+                'q' => d.Piece.b_queen,
+                'k' => d.Piece.b_king,
+                'P' => d.Piece.w_pawn,
+                'N' => d.Piece.w_knight,
+                'B' => d.Piece.w_bishop,
+                'R' => d.Piece.w_rook,
+                'Q' => d.Piece.w_queen,
+                'K' => d.Piece.w_king,
+                else => d.Piece.empty,
+            };
+            var sq: usize = file_count + (@as(usize, @intCast(rank)) << d.WIDTH_SHIFT);
+            if (p == d.Piece.empty) {
+                // fill in multiple empty slots
+                var numempty = std.fmt.parseUnsigned(u4, c[0..1], 10) catch @panic("FEN: bad character");
+                while (numempty > 0) : (numempty -= 1) {
+                    out.layout[sq] = p;
+                    sq += 1;
+                    file_count += 1;
+                }
+            } else {
+                out.layout[sq] = p;
+                out.occupied |= (@as(u64, 1) << @intCast(sq));
+                if (p.is_white()) {
+                    out.white_occupied |= (@as(u64, 1) << @intCast(sq));
+                }
+
+                file_count += 1;
+            }
+
+            c = c[1..];
+        }
+
+        if (rank != 0) {
+            // expect a separator
+            if (c[0] != '/') {
+                @panic("FEN: expected '/'");
+            }
+
+            c = c[1..];
+        }
+    }
+
+    // expect a active color
+    if (c[0] != ' ') {
+        std.debug.panic("FEN: expected space before color field, but got {s}\n", .{c});
+    }
+    c = c[1..];
+
+    out.flags.black_turn = switch (c[0]) {
+        'w' => false,
+        'b' => true,
+        else => @panic("FEN: Bad char for move turn"),
+    };
+    c = c[1..];
+
+    // expect castling
+    if (c[0] != ' ') {
+        @panic("FEN: expected ' '");
+    }
+    c = c[1..];
+
+    while (c[0] != ' ') : (c = c[1..]) {
+        switch (c[0]) {
+            'K' => {
+                out.flags.w_can_oo = true;
+            },
+            'Q' => {
+                out.flags.w_can_ooo = true;
+            },
+            'k' => {
+                out.flags.b_can_oo = true;
+            },
+            'q' => {
+                out.flags.b_can_ooo = true;
+            },
+            '-' => {},
+            else => @panic("FEN: Bad char for castling"),
+        }
+    }
+
+    // expect en passant
+    if (c[0] != ' ') {
+        @panic("FEN: expected ' '");
+    }
+    c = c[1..];
+
+    if (c[0] != '-') {
+        out.flags.enpassant_sq = @intCast(str_sq(c[0..2]));
+    }
+
+    // we don't care about the rest yet
+    return out;
 }
 
 pub fn state_from_moves(moves: []const u8, gi: *d.gameinfo) d.Board {

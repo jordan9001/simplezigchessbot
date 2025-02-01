@@ -7,7 +7,14 @@ const d = @import("./defs.zig");
 const heap = std.heap.c_allocator;
 
 fn usage() noreturn {
-    std.debug.print("Unknown argument\n", .{}); //TODO
+    std.debug.print(
+        \\Arguments:
+        \\  -h : print this information
+        \\  -v : print debug information
+        \\  -d : select evalutation depth
+        \\
+        \\
+    , .{});
     std.process.exit(255);
 }
 
@@ -16,6 +23,7 @@ pub fn main() !void {
     //TODO accept new games from gameStart and parse FEN for initial start point
 
     var args = try std.process.argsWithAllocator(heap);
+    _ = args.next();
     while (args.next()) |arg| {
         if (arg[0] != '-') {
             usage();
@@ -40,7 +48,7 @@ pub fn main() !void {
 
     args.deinit();
 
-    std.debug.print("Starting up\n", .{});
+    std.debug.print("Starting up, using depth of {} \n", .{d.default_depth});
 
     var threads: [2]std.Thread = undefined;
 
