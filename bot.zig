@@ -101,7 +101,7 @@ fn evaluate(board: *d.Board) f32 {
             }
 
             pos_luts += @floatFromInt(luts.g.value_by_num_enemies[num_enemies - d.LUT_MIN_ENEMIES][@intFromEnum(p)][sq]);
-            pos_luts += @floatFromInt(luts.g.value_by_num_enemies[(w_piece_count + b_piece_count) - d.LUT_MIN_PIECES][@intFromEnum(p)][sq]);
+            pos_luts += @floatFromInt(luts.g.value_by_num_pieces[(w_piece_count + b_piece_count) - d.LUT_MIN_PIECES][@intFromEnum(p)][sq]);
         }
     }
 
@@ -160,13 +160,19 @@ fn expand(state: *state_node) bool {
 
                 // check if we can take
                 if ((movesq & (WIDTH - 1)) != 0) {
-                    if (((@as(u64, 1) << @truncate(movesq - 1)) & state.board.occupied) == 0) {
-                        moves |= (@as(u64, 1) << @truncate(movesq - 1));
+                    const diagmv = (@as(u64, 1) << @truncate(movesq - 1));
+                    if ((diagmv & state.board.occupied) != 0) {
+                        if (p.is_white() == ((diagmv & state.board.white_occupied) == 0)) {
+                            moves |= (@as(u64, 1) << @truncate(movesq - 1));
+                        }
                     }
                 }
                 if ((movesq & (WIDTH - 1)) != (WIDTH - 1)) {
-                    if (((@as(u64, 1) << @truncate(movesq + 1)) & state.board.occupied) == 0) {
-                        moves |= (@as(u64, 1) << @truncate(movesq + 1));
+                    const diagmv = (@as(u64, 1) << @truncate(movesq + 1));
+                    if ((diagmv & state.board.occupied) != 0) {
+                        if (p.is_white() == ((diagmv & state.board.white_occupied) == 0)) {
+                            moves |= (@as(u64, 1) << @truncate(movesq + 1));
+                        }
                     }
                 }
             },
@@ -180,26 +186,26 @@ fn expand(state: *state_node) bool {
             d.Piece.w_bishop, d.Piece.b_bishop => {
                 // use magic
                 const mi: luts.MagicInfo = luts.g.bishop_magic[sq];
-                const index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+                const index = (mi.magic *% (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
 
                 moves = luts.g.lut_mem[index + mi.tbl_off];
             },
             d.Piece.w_rook, d.Piece.b_rook => {
                 // use magic
                 const mi: luts.MagicInfo = luts.g.rook_magic[sq];
-                const index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+                const index = (mi.magic *% (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
 
                 moves = luts.g.lut_mem[index + mi.tbl_off];
             },
             d.Piece.w_queen, d.Piece.b_queen => {
                 // use magic
                 var mi: luts.MagicInfo = luts.g.bishop_magic[sq];
-                var index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+                var index = (mi.magic *% (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
 
                 moves = luts.g.lut_mem[index + mi.tbl_off];
 
                 mi = luts.g.rook_magic[sq];
-                index = (mi.magic * (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
+                index = (mi.magic *% (mi.mask & state.board.occupied)) >> @truncate(mi.shift);
 
                 moves |= luts.g.lut_mem[index + mi.tbl_off];
             },
@@ -311,6 +317,13 @@ fn work() void {
 
         work_queue_mux.unlock();
 
+        //DEBUG
+        //if (node.data.move_start < 0) {
+        //    std.debug.print("Working on root node\n", .{});
+        //} else {
+        //    std.debug.print("Working on node {} {s}{s}\n", .{ node.data.depth, sq_str(node.data.move_start), sq_str(node.data.move_end) });
+        //}
+
         // expand it if it needs expanding
         if (node.data.depth < node.data.target_depth) {
             if (expand(&node.data)) {
@@ -343,25 +356,27 @@ fn work() void {
             if (cnode.best_move_start < 0) {
                 cnode.best_eval = pbest;
                 cnode.best_move_start = pnode.move_start;
-                cnode.best_move_start = pnode.move_end;
+                cnode.best_move_end = pnode.move_end;
             } else if (cnode.board.flags.black_turn) {
                 // this is black's turn, so it wants the eval that is most negative
                 if (pbest < cnode.best_eval) {
                     cnode.best_eval = pbest;
                     cnode.best_move_start = pnode.move_start;
-                    cnode.best_move_start = pnode.move_end;
+                    cnode.best_move_end = pnode.move_end;
                 }
             } else {
                 if (pbest > cnode.best_eval) {
                     cnode.best_eval = pbest;
                     cnode.best_move_start = pnode.move_start;
-                    cnode.best_move_start = pnode.move_end;
+                    cnode.best_move_end = pnode.move_end;
                 }
             }
 
             const prev_child_count = cnode.live_children;
             cnode.live_children -= 1;
             cnode.mux.unlock();
+
+            //std.debug.print("Parent pbest {}, now {}\n", .{ pbest, cnode.best_eval });
 
             // free the lower node
             const tofree: *WorkQueue.Node = @fieldParentPtr("data", pnode);
@@ -380,7 +395,7 @@ fn work() void {
                 // this is safe because we can only reach this if we were the last child up
                 // right?
 
-                send_move(&cnode.game_id, cnode.best_move_start, cnode.best_move_end);
+                send_move(cnode.game_id[0..cnode.game_id_sz], cnode.best_move_start, cnode.best_move_end);
 
                 // free it as well, now that we are done with it
                 const roottofree: *WorkQueue.Node = @fieldParentPtr("data", cnode);
@@ -406,7 +421,7 @@ fn queue_board(gameid: []const u8, board: *const d.Board, target_depth: u16) voi
     newnode.data.live_children = 0;
 
     @memset(&newnode.data.game_id, 0);
-    @memcpy(&newnode.data.game_id, gameid);
+    @memcpy(newnode.data.game_id[0..gameid.len], gameid);
     newnode.data.game_id_sz = @intCast(gameid.len);
     newnode.data.move_start = -1;
     newnode.data.move_end = -1;
@@ -423,6 +438,8 @@ fn queue_board(gameid: []const u8, board: *const d.Board, target_depth: u16) voi
     work_queue_mux.unlock();
 
     work_ready_sem.post();
+
+    std.debug.print("Queued board\n", .{});
 }
 
 fn state_from_moves(moves: []const u8) d.Board {
@@ -437,7 +454,7 @@ fn state_from_moves(moves: []const u8) d.Board {
     var src: usize = 0;
     var dst: usize = 0;
 
-    while (c.len > 0) {
+    while (c.len > 0) : (board.flags.black_turn = !board.flags.black_turn) {
         while (c[0] == ' ') : (c = c[1..]) {}
 
         src = @intCast(str_sq(c));
@@ -565,7 +582,7 @@ fn sq_str(sq: i64) [2]u8 {
 
     var res: [2]u8 = undefined;
 
-    res[0] = "abcdefg"[@intCast(rank)];
+    res[0] = "abcdefgh"[@intCast(rank)];
     res[1] = "12345678"[@intCast(file)];
 
     return res;
@@ -583,7 +600,7 @@ fn str_sq(s: []const u8) i8 {
     return sq;
 }
 
-const DEFAULT_DEPTH = 1; //TODO test and expand
+const DEFAULT_DEPTH = 4; //TODO test and expand
 const MAX_GAMES = 3; //TODO test and raise
 const MAX_POLFD = 1 + MAX_GAMES;
 const HOST = "lichess.org";
@@ -597,10 +614,13 @@ const gameinfo = struct {
     as_black: bool,
 };
 
+const StreamQueue = std.DoublyLinkedList(*one_game_ctx);
+
 const game_write_ctx = struct {
     gamecount: usize,
     cmulti: *cURL.CURLM,
     gameinfos: [MAX_GAMES]gameinfo,
+    add_stream_queue: StreamQueue,
 };
 
 const one_game_ctx = struct {
@@ -637,7 +657,7 @@ fn send_req(path: [:0]const u8, is_post: bool) void {
     var response_code: c_long = 0;
     _ = cURL.curl_easy_getinfo(chandle, cURL.CURLINFO_RESPONSE_CODE, &response_code);
 
-    std.debug.print("{s} = {}\n", .{ path, response_code });
+    std.debug.print("{s} {s} = {}\n", .{ if (is_post) "POST" else "GET", path, response_code });
     if (response_code != 200) {
         // do we need to drop the game or something
         // probably should return an error
@@ -779,9 +799,10 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
                 gamectx.gameinfos[gi_i].idlen = idlen;
                 @memcpy(gamectx.gameinfos[gi_i].id[0..idlen], chal_data.value.challenge.id);
 
-                gamectx.gameinfos[gi_i].as_black = true;
+                gamectx.gameinfos[gi_i].as_black = false;
+                // final color applies to the challenger, not us?
                 if (std.mem.eql(u8, chal_data.value.challenge.finalColor, "white")) {
-                    gamectx.gameinfos[gi_i].as_black = false;
+                    gamectx.gameinfos[gi_i].as_black = true;
                 }
 
                 break;
@@ -847,10 +868,11 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
 
         // add the stream for a game start
         // /api/bot/game/stream/{}
-        const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/bot/game/stream/{s}", .{game_data.value.game.id}) catch unreachable;
 
-        _ = add_stream(url, newctx);
-        heap.free(url); // libcurl docs say we can free this immediately after the curl_easy_setopt
+        // add to the queue so we can do this outside of the callback
+        const new_stream_node = heap.create(StreamQueue.Node) catch unreachable;
+        new_stream_node.data = newctx;
+        gamectx.add_stream_queue.append(new_stream_node);
     } else if (std.mem.eql(u8, msg_data.value.type, "gameFinish")) {
         const game_data = std.json.parseFromSlice(
             stream_msg_type_game_evt,
@@ -876,6 +898,14 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
         } else {
             std.debug.panic("Got a finish for a game we haven't stored: {s}\n", .{game_data.value.game.id});
         }
+
+        // I thiiiiink we can free the ctx here?
+        // the multi handle is still in play
+        // and we can't remove it in a callback I don't think
+        // but it shouldn't be called again?
+        //TODO TODO TODO
+        // Why is this giving us an invalid pointer free???
+        //heap.destroy(ctx);
     } else if ((std.mem.eql(u8, msg_data.value.type, "gameFull")) or (std.mem.eql(u8, msg_data.value.type, "gameState"))) {
         // this one should have a ctx.gameinfo that is non-null
         if (ctx.gameinfo == null) {
@@ -912,6 +942,7 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
         const board = state_from_moves(state_data.moves);
 
         // see if it is my turn or not
+        std.debug.print("board_turn = {}, gi_black = {}\n", .{ board.flags.black_turn, ctx.gameinfo.?.as_black });
         if (board.flags.black_turn == ctx.gameinfo.?.as_black) {
             // when we get a move, make a board and put it on the queue
             queue_board(ctx.gameinfo.?.id[0..ctx.gameinfo.?.idlen], &board, DEFAULT_DEPTH);
@@ -922,6 +953,7 @@ fn game_loop_data_cb(ptr: [*]u8, _: usize, nmemb: usize, ctx: *one_game_ctx) cal
 }
 
 fn add_stream(path: [:0]const u8, ctx: *one_game_ctx) *cURL.CURL {
+    // can't call from within a callback, btw
     var ec: cURL.CURLcode = 0;
     var mc: cURL.CURLMcode = 0;
 
@@ -949,7 +981,7 @@ fn add_stream(path: [:0]const u8, ctx: *one_game_ctx) *cURL.CURL {
 
     mc = cURL.curl_multi_add_handle(ctx.gamectx.cmulti, chandle);
     if (mc != cURL.CURLM_OK) {
-        @panic("failed to add initial curl handle");
+        std.debug.panic("failed to add initial curl handle for a stream to {s}: {}", .{ path, mc });
     }
 
     return chandle;
@@ -960,6 +992,7 @@ fn game_loop() void {
         .gamecount = 0,
         .cmulti = cURL.curl_multi_init() orelse @panic("Can't init curl multi"),
         .gameinfos = undefined,
+        .add_stream_queue = StreamQueue{},
     };
 
     var ctx: one_game_ctx = .{
@@ -1039,6 +1072,28 @@ fn game_loop() void {
             }
 
             cURL.curl_easy_cleanup(msg.*.easy_handle);
+
+            // free the one_game_ctx as well here?
+            // or can we free it earlier in a gameFinish message?
+        }
+
+        // add waiting stream nodes
+
+        while (true) {
+            const node: ?*StreamQueue.Node = gamectx.add_stream_queue.pop();
+            if (node == null) {
+                break;
+            }
+
+            const newctx: *one_game_ctx = node.?.data;
+
+            heap.destroy(node.?);
+
+            const url = std.fmt.allocPrintZ(heap, HTTPS_HOST ++ "/api/bot/game/stream/{s}", .{newctx.gameinfo.?.id[0..newctx.gameinfo.?.idlen]}) catch unreachable;
+
+            // we can't actually do this here, dang it, add it to some queue I guess
+            _ = add_stream(url, newctx);
+            heap.free(url); // libcurl docs say we can free this immediately after the curl_easy_setopt
         }
     }
 
@@ -1048,7 +1103,7 @@ fn game_loop() void {
 var g_hdr_list: ?*cURL.curl_slist = null;
 
 pub fn main() !void {
-    std.debug.print("Starting up {}\n", .{luts.g.king_moves.len});
+    std.debug.print("Starting up\n", .{});
 
     if (cURL.curl_global_init(cURL.CURL_GLOBAL_ALL) != cURL.CURLE_OK) {
         std.debug.print("Curl Global Init Failed\n", .{});
@@ -1059,7 +1114,7 @@ pub fn main() !void {
     //var threads: [std.Thread.getCpuCount() - 3]std.Thread = undefined;
     //DEBUG
     //TODO up this and expand
-    var threads: [1]std.Thread = undefined;
+    var threads: [2]std.Thread = undefined;
 
     const spawn_config = std.Thread.SpawnConfig{};
 
