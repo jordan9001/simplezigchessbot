@@ -71,6 +71,7 @@ pub const MAX_PIECES = MAX_ENEMIES * 2;
 pub const LUT_MIN_ENEMIES = 1;
 pub const LUT_MIN_PIECES = 3;
 pub const MAX_ID_SZ = 0x10;
+pub const DEFAULT_NUM_THREADS = 0x4;
 
 pub const gameinfo = struct {
     id: [MAX_ID_SZ]u8,

@@ -66,7 +66,7 @@ fn evaluate(board: *d.Board) f32 {
             d.Piece.w_rook => 5,
             d.Piece.b_queen => -9,
             d.Piece.w_queen => 9,
-            d.Piece.b_king => 900,
+            d.Piece.b_king => -900,
             d.Piece.w_king => 900,
             d.Piece.empty => 0,
         };
@@ -89,33 +89,44 @@ fn evaluate(board: *d.Board) f32 {
         piece_balance -= 0.45;
     }
 
+    // check for check and checkmate
+    //TODO
+
+    // check for attacks
+    //TODO
+
     // check for pawn structure
     //TODO
 
     // check for pass pawn
     //TODO
 
-    // check for check and checkmate
-    //TODO
-
     // check our position in the LUTs
     var pos_luts: f32 = 0;
 
-    for (board.layout, 0..board.layout.len) |p, sq| {
-        if (p != d.Piece.empty) {
-            var num_enemies = w_piece_count;
-            if (p.is_white()) {
-                num_enemies = b_piece_count;
-            }
+    if ((w_piece_count + b_piece_count) >= d.LUT_MIN_PIECES) {
+        for (board.layout, 0..board.layout.len) |p, sq| {
+            if (p != d.Piece.empty) {
+                var num_enemies = w_piece_count;
+                if (p.is_white()) {
+                    num_enemies = b_piece_count;
+                }
 
-            pos_luts += @floatFromInt(luts.g.value_by_num_enemies[num_enemies - d.LUT_MIN_ENEMIES][@intFromEnum(p)][sq]);
-            pos_luts += @floatFromInt(luts.g.value_by_num_pieces[(w_piece_count + b_piece_count) - d.LUT_MIN_PIECES][@intFromEnum(p)][sq]);
+                if (num_enemies < d.LUT_MIN_ENEMIES) {
+                    // we win, no need for this lookup?
+                    continue;
+                }
+
+                pos_luts += @floatFromInt(luts.g.value_by_num_enemies[num_enemies - d.LUT_MIN_ENEMIES][@intFromEnum(p)][sq]);
+
+                pos_luts += @floatFromInt(luts.g.value_by_num_pieces[(w_piece_count + b_piece_count) - d.LUT_MIN_PIECES][@intFromEnum(p)][sq]);
+            }
         }
     }
 
     // add it all together with some reasonable k values
     //TODO find/train better k values?
-    return (pos_luts * 1.0) + (piece_balance * 2100.0);
+    return (pos_luts * 0.0) + (piece_balance * 1000.0);
 }
 
 fn expand(state: *state_node) bool {
@@ -271,7 +282,8 @@ fn expand(state: *state_node) bool {
             newnode.data.parent = state;
 
             newnode.data.board = state.board;
-            newnode.data.board.flags.black_turn = !w_turn;
+            // flip sides
+            newnode.data.board.flags.black_turn = w_turn;
 
             // clear the enpassant each turn, unless we just did a double, then set it
             //TODO
@@ -281,11 +293,11 @@ fn expand(state: *state_node) bool {
             newnode.data.board.layout[sq] = d.Piece.empty;
             newnode.data.board.layout[movesq] = p;
             newnode.data.board.occupied |= move;
-            newnode.data.board.occupied &= ~move;
+            newnode.data.board.occupied &= ~(@as(u64, 1) << @intCast(sq));
 
             if (w_turn) {
                 newnode.data.board.white_occupied |= move;
-                newnode.data.board.white_occupied &= ~move;
+                newnode.data.board.white_occupied &= ~(@as(u64, 1) << @intCast(sq));
             }
 
             // add the move to the queue!
@@ -298,6 +310,34 @@ fn expand(state: *state_node) bool {
     }
 
     return expanded;
+}
+
+fn print_moveset(node: ?*state_node) void {
+    var n = node;
+    // prints backwards
+    while (n != null and n.?.move_start >= 0) : (n = n.?.parent) {
+        std.debug.print("{s}{s} < ", .{
+            sq_str(n.?.move_start),
+            sq_str(n.?.move_end),
+        });
+    }
+    std.debug.print("\n", .{});
+}
+
+fn print_occ(occ: u64) void {
+    var rank: u64 = 8;
+    while (rank > 0) : (rank -= 1) {
+        for (0..8) |file| {
+            const sq = file + ((rank - 1) << d.WIDTH_SHIFT);
+            const msk = @as(u64, 1) << @intCast(sq);
+            if ((msk & occ) != 0) {
+                std.debug.print("#", .{});
+            } else {
+                std.debug.print("_", .{});
+            }
+        }
+        std.debug.print("|\n", .{});
+    }
 }
 
 pub fn work() void {
@@ -322,7 +362,8 @@ pub fn work() void {
             if (node.data.move_start < 0) {
                 std.debug.print("Working on root node\n", .{});
             } else {
-                std.debug.print("Working on node {} {s}{s}\n", .{ node.data.depth, sq_str(node.data.move_start), sq_str(node.data.move_end) });
+                std.debug.print("Working on node ", .{});
+                print_moveset(&node.data);
             }
         }
 
@@ -351,23 +392,31 @@ pub fn work() void {
 
             // propagate the best_eval, if it is the min/max we want
             const pbest = pnode.best_eval;
+            var oldbest: f32 = 0;
+            var changed: bool = false;
 
             // do the mux instead of atomic
 
             cnode.mux.lock();
+            oldbest = cnode.best_eval;
             if (cnode.best_move_start < 0) {
+                changed = true;
                 cnode.best_eval = pbest;
                 cnode.best_move_start = pnode.move_start;
                 cnode.best_move_end = pnode.move_end;
             } else if (cnode.board.flags.black_turn) {
                 // this is black's turn, so it wants the eval that is most negative
                 if (pbest < cnode.best_eval) {
+                    changed = true;
+
                     cnode.best_eval = pbest;
                     cnode.best_move_start = pnode.move_start;
                     cnode.best_move_end = pnode.move_end;
                 }
             } else {
                 if (pbest > cnode.best_eval) {
+                    changed = true;
+
                     cnode.best_eval = pbest;
                     cnode.best_move_start = pnode.move_start;
                     cnode.best_move_end = pnode.move_end;
@@ -379,7 +428,12 @@ pub fn work() void {
             cnode.mux.unlock();
 
             if (d.debug_mode) {
-                std.debug.print("Parent pbest {}, now {}\n", .{ pbest, cnode.best_eval });
+                std.debug.print("    up chain ({d:.0}, {}) @ ", .{ oldbest, prev_child_count });
+                print_moveset(pnode);
+
+                if (changed) {
+                    std.debug.print("    previous {d:.0}, now {d:.0}\n", .{ oldbest, pbest });
+                }
             }
 
             // free the lower node
@@ -399,10 +453,9 @@ pub fn work() void {
                 // this is safe because we can only reach this if we were the last child up
                 // right?
 
+                std.debug.print("Evaluated at {d:.0}\n", .{cnode.best_eval});
+
                 (send_move_f.?)(cnode.game_id[0..cnode.game_id_sz], cnode.best_move_start, cnode.best_move_end);
-
-                std.debug.print("Evaluated at {}\n", .{cnode.best_eval});
-
                 // free it as well, now that we are done with it
                 const roottofree: *WorkQueue.Node = @fieldParentPtr("data", cnode);
                 heap.destroy(roottofree);
@@ -708,11 +761,11 @@ pub fn sq_str(sq: i64) [2]u8 {
 }
 
 pub fn str_sq(s: []const u8) i8 {
-    if (s[0] > 'g' or s[0] < 'a') {
-        unreachable;
+    if (s[0] > 'h' or s[0] < 'a') {
+        std.debug.panic("Got bad arg[0] to str_sq: {s}\n", .{s});
     }
     if (s[1] > '8' or s[1] < '1') {
-        unreachable;
+        std.debug.panic("Got bad arg[1] to str_sq: {s}\n", .{s});
     }
 
     var sq: i8 = @intCast(s[0] - 'a');

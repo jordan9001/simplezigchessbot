@@ -12,6 +12,7 @@ fn usage() noreturn {
         \\  -h : print this information
         \\  -v : print debug information
         \\  -d : select evalutation depth
+        \\  -n : choose number of threads
         \\
         \\
     , .{});
@@ -21,6 +22,8 @@ fn usage() noreturn {
 pub fn main() !void {
     //TODO add param for number of threads
     //TODO accept new games from gameStart and parse FEN for initial start point
+
+    var num_threads: usize = d.DEFAULT_NUM_THREADS;
 
     var args = try std.process.argsWithAllocator(heap);
     _ = args.next();
@@ -33,6 +36,14 @@ pub fn main() !void {
         switch (arg[1]) {
             'v' => {
                 d.debug_mode = true;
+            },
+            'n' => {
+                const a = args.next();
+                if (a == null) {
+                    usage();
+                }
+
+                num_threads = std.fmt.parseUnsigned(usize, a.?, 0) catch usage();
             },
             'd' => {
                 const a = args.next();
@@ -48,9 +59,14 @@ pub fn main() !void {
 
     args.deinit();
 
+    if (d.debug_mode) {
+        // overwrite some args as needed
+        num_threads = 1;
+    }
+
     std.debug.print("Starting up, using depth of {} \n", .{d.default_depth});
 
-    var threads: [2]std.Thread = undefined;
+    var threads = heap.alloc(std.Thread, num_threads) catch unreachable;
 
     const spawn_config = std.Thread.SpawnConfig{};
 
